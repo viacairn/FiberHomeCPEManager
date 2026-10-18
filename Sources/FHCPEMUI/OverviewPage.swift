@@ -90,8 +90,8 @@ public struct OverviewPage: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
 
                 VStack(alignment: .trailing, spacing: 5) {
-                    uplinkBadge
                     heroStatusBadge
+                    uplinkBadge
                 }
                 .fixedSize(horizontal: true, vertical: false)
             }
@@ -169,7 +169,7 @@ public struct OverviewPage: View {
         guard data.isLive else { return ("设备未连接", .neutral, Theme.inkMuted) }
         return switch (data.cellularConnected, data.ethernetConnected) {
         case (true, true): ("已注册 · 双网在线", .positive, Theme.positive)
-        case (true, false): ("已注册 · 蜂窝在线", .positive, Theme.positive)
+        case (true, false): ("已注册", .positive, Theme.positive)
         case (false, true): ("以太网在线", .positive, Theme.positive)
         case (false, false):
             if data.hasCellularSignal {
@@ -297,7 +297,7 @@ public struct OverviewPage: View {
                 Spacer(minLength: 0)
                 Button(action: onMoreInfo) {
                     HStack(spacing: 3) {
-                        Text("详情")
+                        Text("更多")
                         Image(systemName: "chevron.right").font(.system(size: 8.5, weight: .bold))
                     }
                     .font(.system(size: 10.5, weight: .semibold))
@@ -310,7 +310,7 @@ public struct OverviewPage: View {
                 }
                 .buttonStyle(.plain)
                 .help("基站与小区、载波聚合与锁定配置")
-                .accessibilityLabel("打开基站与小区")
+                .accessibilityLabel("更多")
             }
             Panel(padding: 8, spacing: 6) {
                 LazyVGrid(columns: Array(repeating: GridItem(.flexible(minimum: 0), spacing: 6), count: 4), spacing: 7) {
@@ -322,10 +322,12 @@ public struct OverviewPage: View {
                                quality: SignalQuality.sinr(MetricFormatter.number(data.radio.sinr)))
                     cellularStat("RSSI", value: FieldFormat.dbm(data.radio.rssi))
 
-                    cellularStat("PCI", value: data.radio.pci)
-                    cellularStat(data.isNR ? "NR-ARFCN" : "EARFCN", value: data.radio.arfcn)
+                    // Where the device is camped, broad to narrow: tracking area, cell,
+                    // physical cell id, carrier frequency.
                     cellularStat("TAC", value: data.radio.tac)
                     cellularStat(data.isNR ? "NCI" : "Cell ID", value: data.radio.cell.map(FieldFormat.hex))
+                    cellularStat("PCI", value: data.radio.pci)
+                    cellularStat(data.isNR ? "NR-ARFCN" : "EARFCN", value: data.radio.arfcn)
 
                     cellularStat("QCI 承载等级", value: data.radio.qci)
                     cellularStat("上行签约速率", value: ulAmbrText)

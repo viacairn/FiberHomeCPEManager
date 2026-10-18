@@ -70,16 +70,16 @@ public struct ControlsPage: View {
             if isLive {
                 ScrollView(.vertical) {
                     VStack(alignment: .leading, spacing: Theme.Space.m) {
-                        uplinkSection
-                        wifiSection
-                        rebootSection
-                        hardwareSection
                         MobileNetworkSection(state: mobile, busy: busy,
                                              onSetAirplane: onSetAirplaneMode,
                                              onSetCellular: onSetCellularData,
                                              onSaveAntenna: onSaveAntenna)
+                        uplinkSection
                         NetworkServicesSection(ddnsCount: ddnsCount, portCount: portMappingCount,
                                                onOpenDDNS: onOpenDDNS, onOpenPorts: onOpenPortMapping)
+                        wifiSection
+                        rebootSection
+                        hardwareSection
                     }
                     .padding(.horizontal, Theme.contentPadding)
                     .padding(.top, 0)

@@ -13,6 +13,7 @@ public struct DevicesPage: View {
     @State private var glyphs = DeviceGlyphStore()
     @State private var glyphRevision = 0
     @State private var editingDevice: ConnectedDevice?
+    @State private var glyphTarget: ConnectedDevice?
 
     public init(devices: [ConnectedDevice], isLive: Bool,
                 query: Binding<String>, filter: Binding<AccessFilter>,
@@ -68,8 +69,14 @@ public struct DevicesPage: View {
         .sheet(item: $editingDevice) { device in
             DHCPReservationEditor(device: device, isLive: isLive, onSave: onReserveIP)
         }
+        .sheet(item: $glyphTarget) { device in
+            GlyphPicker(device: device, current: glyphs.glyph(for: device)) { choice in
+                glyphs.assign(choice, to: device)
+                glyphRevision += 1
+            }
+        }
         .onChange(of: isLive) { _, live in
-            if !live { editingDevice = nil }
+            if !live { editingDevice = nil; glyphTarget = nil }
         }
     }
 
@@ -171,6 +178,7 @@ public struct DevicesPage: View {
                     ForEach(filtered) { device in
                         DeviceRow(device: device,
                                   symbol: glyphs.glyph(for: device)?.symbol ?? device.systemSymbol)
+                            .id("\(device.id)#\(glyphRevision)")
                             .contextMenu {
                                 Button {
                                     editingDevice = device
@@ -180,15 +188,12 @@ public struct DevicesPage: View {
                                 .disabled(onReserveIP == nil
                                           || device.mac?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false)
                                 Divider()
-                                Menu("设置图标") {
-                                    ForEach(DeviceGlyph.allCases, id: \.self) { glyph in
-                                        Button {
-                                            glyphs.assign(glyph, to: device)
-                                            glyphRevision += 1
-                                        } label: {
-                                            Label(glyph.title, systemImage: glyph.symbol)
-                                        }
-                                    }
+                                // Flat items only: a nested submenu is rebuilt by the once-per-second
+                                // refresh while it is open, which closed it under the cursor.
+                                Button {
+                                    glyphTarget = device
+                                } label: {
+                                    Label("设置图标…", systemImage: "square.grid.2x2")
                                 }
                                 Button("恢复自动识别") {
                                     glyphs.assign(nil, to: device)
@@ -215,8 +220,10 @@ public struct DevicesPage: View {
             if let editingDevice, !new.contains(where: { $0.id == editingDevice.id }) {
                 self.editingDevice = nil
             }
+            if let glyphTarget, !new.contains(where: { $0.id == glyphTarget.id }) {
+                self.glyphTarget = nil
+            }
         }
-        .id(glyphRevision)
     }
 
     private var emptyState: some View {
@@ -471,5 +478,60 @@ private struct DeviceRow: View {
         if days > 0 { return "\(days) 天" }
         if hours > 0 { return "\(hours) 小时" }
         return "\(minutes) 分"
+    }
+}
+
+/// Icon chooser shown as a sheet: a grid is easier to hit than a 20-item submenu and is not
+/// disturbed by the periodic refresh.
+private struct GlyphPicker: View {
+    let device: ConnectedDevice
+    let current: DeviceGlyph?
+    let onChoose: (DeviceGlyph?) -> Void
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Theme.Space.m) {
+            PanelHeading("设置图标")
+            Text(device.name)
+                .font(.system(size: 11.5, weight: .semibold))
+                .lineLimit(1)
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 6), count: 4), spacing: 6) {
+                ForEach(DeviceGlyph.allCases, id: \.self) { glyph in
+                    let selected = current == glyph
+                    Button {
+                        onChoose(glyph); dismiss()
+                    } label: {
+                        VStack(spacing: 3) {
+                            Image(systemName: glyph.symbol).font(.system(size: 15, weight: .medium))
+                            Text(glyph.title).font(.system(size: 9.5)).lineLimit(1).minimumScaleFactor(0.8)
+                        }
+                        .foregroundStyle(selected ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(Color.primary))
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 46)
+                        .background(Theme.surface, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .strokeBorder(selected ? Color.accentColor.opacity(0.6) : Theme.hairline,
+                                          lineWidth: selected ? 1 : 0.5))
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(glyph.title)
+                }
+            }
+            HStack {
+                Button("恢复自动识别") { onChoose(nil); dismiss() }
+                    .buttonStyle(.plain)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(Color.accentColor)
+                Spacer(minLength: 0)
+                Button("完成") { dismiss() }
+                    .buttonStyle(.plain)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(Theme.inkSecondary)
+                    .keyboardShortcut(.cancelAction)
+            }
+        }
+        .padding(Theme.contentPadding)
+        .frame(width: Theme.compactWidth - 32)
     }
 }

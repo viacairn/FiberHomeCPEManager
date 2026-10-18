@@ -41,20 +41,36 @@ public struct CredentialStore: Sendable {
         return try JSONDecoder().decode(Credentials.self, from: data)
     }
 
+    /// An item whose access list names a different build of this app makes macOS ask for
+    /// approval on every access. Ad-hoc signing gives each build a new identity, which is
+    /// exactly that situation. Items are therefore created with an access list that trusts
+    /// every application (an empty trusted-application array), so a rebuilt binary never
+    /// triggers a prompt. The item is still scoped to this Mac's login keychain.
+    private func openAccess() -> SecAccess? {
+        var access: SecAccess?
+        let status = SecAccessCreate("FiberHomeCPEManager 管理后台连接" as CFString,
+                                     [] as CFArray, &access)
+        return status == errSecSuccess ? access : nil
+    }
+
     public func save(_ credentials: Credentials) throws {
         let data = try JSONEncoder().encode(credentials)
-        let update: [String: Any] = [kSecValueData as String: data]
-        let status = SecItemUpdate(baseQuery as CFDictionary, update as CFDictionary)
-        if status == errSecItemNotFound {
+        // Recreate rather than update: an update keeps the old, build-specific access list.
+        // A failed delete (item owned by another build) falls through to the update path.
+        let deleted = SecItemDelete(baseQuery as CFDictionary)
+        if deleted == errSecSuccess || deleted == errSecItemNotFound {
             var add = baseQuery
             add[kSecValueData as String] = data
             add[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
             add[kSecAttrLabel as String] = "FiberHomeCPEManager 管理后台连接"
+            if let access = openAccess() { add[kSecAttrAccess as String] = access }
             let result = SecItemAdd(add as CFDictionary, nil)
             guard result == errSecSuccess else { throw KeychainError(status: result) }
-        } else if status != errSecSuccess {
-            throw KeychainError(status: status)
+            return
         }
+        let status = SecItemUpdate(baseQuery as CFDictionary,
+                                   [kSecValueData as String: data] as CFDictionary)
+        guard status == errSecSuccess else { throw KeychainError(status: status) }
     }
 
     /// The password is cleared before the value is released, so it does not linger in

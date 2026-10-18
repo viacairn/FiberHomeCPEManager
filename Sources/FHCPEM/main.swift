@@ -678,6 +678,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// True once this process has asked for the stored credential.
     private var didAttemptKeychainLoad = false
+    /// What the keychain is known to hold, so an unchanged login never touches it again.
+    private var keychainSnapshot: Credentials?
 
     /// True while a credential is (supposed to be) in the Keychain.
     var isRememberingCredential: Bool { preferences.rememberConnection }
@@ -686,6 +688,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func forgetCredential() {
         do {
             try keychain.delete()
+            keychainSnapshot = nil
             preferences.rememberConnection = false
             model.savePassword = false
             currentCredentials = nil
@@ -720,6 +723,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 model.draftUsername = saved.username
                 model.draftPassword = saved.password
                 currentCredentials = saved
+                keychainSnapshot = saved
             }
         } catch {
             // A denied or missing item is not fatal: fall back to manual entry.
@@ -942,11 +946,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         preferences.rememberConnection = wantsPersistence
         guard wantsPersistence else {
             // Unchecking is an explicit "forget me": remove any previous item.
-            if wasRemembering { try? keychain.delete() }
+            if wasRemembering { try? keychain.delete(); keychainSnapshot = nil }
             return
         }
+        guard keychainSnapshot != credentials else { return }
         do {
             try keychain.save(credentials)
+            keychainSnapshot = credentials
         } catch {
             // A Keychain failure must not break a working session; report it instead.
             preferences.rememberConnection = false
@@ -1084,7 +1090,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                               devices: reading.devices,
                               stale: false,
                               connected: true)
-        model.devices = reading.devices
+        // Assigning an equal array still re-renders every row; an open context menu is rebuilt
+        // by that and closes, so publish only real changes.
+        if model.devices != reading.devices { model.devices = reading.devices }
         model.cells = reading.snapshot.cells.isEmpty
             ? servingOnly(reading.snapshot)
             : reading.snapshot.cells

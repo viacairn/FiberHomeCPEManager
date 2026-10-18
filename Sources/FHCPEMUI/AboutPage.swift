@@ -54,7 +54,7 @@ public struct AboutPage: View {
     private var featuresPanel: some View {
         Panel(padding: Theme.Space.m, spacing: Theme.Space.s) {
             PanelHeading("本地设备管理")
-            Text("支持 LG6851F / RP0112")
+            Text("支持烽火 CPE 设备，RP0106+")
                 .font(Theme.footnote)
                 .foregroundStyle(Theme.inkSecondary)
             Text("通过本地网络连接 CPE，查看网络与流量、管理在线设备、调整设备设置及收发短信。")
@@ -94,13 +94,7 @@ public struct AboutPage: View {
 
     private var versionLabel: String {
         let version = bundleValue("CFBundleShortVersionString")
-        let build = bundleValue("CFBundleVersion")
-        return switch (version, build) {
-        case let (version?, build?): "版本 \(version)（\(build)）"
-        case let (version?, nil): "版本 \(version)"
-        case let (nil, build?): "构建 \(build)"
-        case (nil, nil): "版本信息不可用"
-        }
+        return "版本 \(version ?? "1.0-Alpha2")"
     }
 
     private func bundleValue(_ key: String) -> String? {
