@@ -654,7 +654,7 @@ public struct CellularDetailPage: View {
                                 Text(item.techTitle)
                                     .font(.system(size: 9.5, weight: .bold))
                                     .foregroundStyle(Color.accentColor)
-                                Text("PCI \(item.pci) · 频点 \(item.arfcn)")
+                                Text("PCI \(item.pciDisplay) · 频点 \(item.arfcn)")
                                     .font(.system(size: 10, weight: .medium).monospacedDigit())
                                     .foregroundStyle(Theme.inkSecondary)
                                 Spacer()
@@ -667,7 +667,7 @@ public struct CellularDetailPage: View {
                                 .buttonStyle(.plain)
                                 .foregroundStyle(Color.accentColor)
                                 .help("编辑候选小区")
-                                .accessibilityLabel("编辑 \(item.techTitle) PCI \(item.pci)")
+                                .accessibilityLabel("编辑 \(item.techTitle) PCI \(item.pciDisplay)")
                                 .disabled(!canConfigureLocks || onUpdateLockedCell == nil)
                                 Button {
                                     onDeleteLockedCell?(item)
@@ -678,7 +678,7 @@ public struct CellularDetailPage: View {
                                 .buttonStyle(.plain)
                                 .foregroundStyle(Theme.inkSecondary)
                                 .help("删除候选小区")
-                                .accessibilityLabel("删除 \(item.techTitle) PCI \(item.pci)")
+                                .accessibilityLabel("删除 \(item.techTitle) PCI \(item.pciDisplay)")
                                 .disabled(!canConfigureLocks || onDeleteLockedCell == nil)
                             }
                         }
@@ -848,9 +848,15 @@ public struct CellularDetailPage: View {
     }
 
     private var cellEditorValue: LockedCell? {
-        guard let arfcn = Int(editingCellARFCN), let pci = Int(editingCellPCI),
-              (0...875000).contains(arfcn), (0...2000).contains(pci),
+        guard let arfcn = Int(editingCellARFCN.trimmingCharacters(in: .whitespaces)),
+              (0...875000).contains(arfcn),
               effectiveLockState.allowsN79ARFCN || !(693335...733333).contains(arfcn) else { return nil }
+        // The stock page accepts an empty PCI to mean "any PCI on this frequency".
+        let pciText = editingCellPCI.trimmingCharacters(in: .whitespaces)
+        let pci: Int?
+        if pciText.isEmpty { pci = nil }
+        else if let value = Int(pciText), (0...2000).contains(value) { pci = value }
+        else { return nil }
         return LockedCell(index: editingCellIndex ?? 0, act: editingCellAct, arfcn: arfcn, pci: pci)
     }
 

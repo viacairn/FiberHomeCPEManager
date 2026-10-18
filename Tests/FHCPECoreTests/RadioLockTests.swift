@@ -398,4 +398,14 @@ struct RadioLockTests {
         await #expect(throws: Error.self) { try await RadioLockService(rpc: rpc).addCell(act: 2, arfcn: 700000, pci: 10) }
         #expect(await rpc.statesAfterWrites.isEmpty)
     }
+
+    /// The list renders `pciDisplay`, never the optional itself. A regression here shows
+    /// up as "PCI Optional(285)" in the lock panel.
+    @Test func optionalPCIDisplaysAsAnyAndWritesAnEmptyString() {
+        let blank = LockedCell(index: 1, act: 2, arfcn: 634464, pci: nil)
+        #expect(blank.pciDisplay == "任意")
+        #expect(blank.pciWireValue == "")
+        #expect(LockedCell(index: 2, act: 1, arfcn: 1850, pci: 0).pciDisplay == "0")
+        #expect(LockedCell(index: 3, act: 2, arfcn: 504990, pci: 101).pciDisplay == "285")
+    }
 }

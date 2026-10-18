@@ -16,7 +16,7 @@ CPE_PASS='…' ./script/ui_matrix.sh    # 完整 UI 矩阵（单次，约 90 秒
 
 ## 1. 单元测试
 
-`script/test.sh` 跑 `swift test`，共 **85 项**，覆盖协议解析、菜单栏几何、图标双别名、短信发送合并、密码全角拦截、5 秒同步策略、设置写入等纯逻辑。**不碰 UI，不碰设备**，所以永远先跑它。
+`script/test.sh` 跑 `swift test`，共 **143 项**，覆盖协议解析、菜单栏几何、图标双别名、短信发送合并、密码全角拦截、5 秒同步策略、设置写入、断线清空、会话失效、固定 IP 校验、锁小区/锁频段互斥与回读等纯逻辑。**不碰 UI，不碰设备**，所以永远先跑它。
 
 ## 2. UI 矩阵
 
@@ -26,10 +26,10 @@ CPE_PASS='…' ./script/ui_matrix.sh    # 完整 UI 矩阵（单次，约 90 秒
 
 | 阶段 | 场景 | 为什么在这个位置 |
 | --- | --- | --- |
-| 1 · 登录页 | `login-empty`、`login-extra`、`login-fullwidth`、`esc`、`cmdw`、`external-click` | 不需要会话，必须在登录前跑 |
+| 1 · 登录页 | `login-empty`、`login-extra`、`login-fullwidth`、`esc`、`cmdw`、`external-click`、`about` | 不需要会话，必须在登录前跑 |
 | 可达性 | `curl http://$CPE_HOST/` | 设备不在本机网段时，登录必然失败；先判定再决定是否跑已连接页 |
 | 2 · 登录 | 真实登录一次 | 只登一次，后续全部复用同一会话 |
-| 3 · 已连接 | `contextmenu`、`styles`、`keys`、`devices-filter-select`、`a11y`、`controls`、`sms`、`sms-poll` | 需要在线数据 |
+| 3 · 已连接 | `contextmenu`、`styles`、`keys`、`devices-filter-select`、`a11y`、`controls`、`sms`、`sms-poll`、`relogin` | 需要在线数据 |
 | 4 · 退出 | `power`、`cmdq` | 会终止进程，因此各自新开实例，必须最后跑 |
 
 ### 覆盖对照
@@ -40,7 +40,9 @@ CPE_PASS='…' ./script/ui_matrix.sh    # 完整 UI 矩阵（单次，约 90 秒
 | §2 保存密码 / 导入网关 | `login-extra` | 勾选项存在、清空 IP 后能回填 |
 | §2 全角密码拦截 | `login-fullwidth` | 全角逗号提示出现、改为半角后提示消失 |
 | §1 菜单栏两种宽度 | `styles` | 勾选后变宽（30.5 → 92.5 pt）、取消后还原 |
-| §8.2 右键菜单 | `contextmenu` | 退出项、显示网速项；不含打开面板/立即刷新 |
+| §8.2 右键菜单 | `contextmenu` | 退出项、显示网速项、重新登录；不含打开面板/立即刷新 |
+| §8.2 重新登录 | `relogin` | 菜单「重新登录」回到连接页并自动使用已保存凭据 |
+| 关于页 | `about` | 登录页与在线状态均可打开，Esc/返回回到来源页 |
 | §8.2 点击外部关闭 | `external-click` | 面板消失 |
 | §8.2 Esc / ⌘W | `esc`、`cmdw` | 关闭面板、不退出应用；二级页 Esc 返回 |
 | §8.2 ⌘1–⌘4 | `keys` | 四个页签分别落到正确页面 |
@@ -55,6 +57,20 @@ CPE_PASS='…' ./script/ui_matrix.sh    # 完整 UI 矩阵（单次，约 90 秒
 `a11y` 还带两个防假通过条件：应用未运行直接 FAIL；扫到的页面少于 6 个也 FAIL。
 
 `tabs` 场景已删除：它的四个页面落点断言与 `keys` 完全重复，只是多花 5 秒。
+
+### 断线与会话失效
+
+不需要设备，单元测试即可覆盖主要契约：
+
+| 测试套件 | 覆盖 |
+| --- | --- |
+| `PageDataTests` | 断线后 `snapshot` / `devices` 不透过 `isLive` 暴露；晚到数据不能回填 |
+| `ShellSessionTests` | 认证失效 → 清空会话、回到登录页、保留可重登状态 |
+| `EndToEndTests` | 被挤占后受保护读返回 `CPEError.authentication` |
+| `RadioLockTests` / `DHCPReservationTests` | 写入前校验、互斥、失败不重试、回读不一致判 `uncertain` |
+| `SafetyTests` | 登录页 HTML/418 识别；短信正文含 `<html>` 不被误判 |
+
+离屏渲染 `UIRender` 的 `16-offline-devices`、`17-offline-sms`、`18-offline-cellular` 用 fixture 固定断线态，不依赖真机。
 
 ### 设备不可达时
 
@@ -79,6 +95,7 @@ summary
 .build/ui_probe controls-toggle         # 关/开指示灯，验证写入与还原
 .build/ui_probe sms-send                # 给 10010 发「流量查询」，验证状态与已发送气泡
 .build/ui_probe sms-poll                # 停留短信页 7 秒，确认同步时间戳更新
+.build/debug/FiberHomeCPEManagerProbe --session-audit   # 两个原生入口：验证客户端会话可并存（会挤掉浏览器会话）
 ```
 
 2026-10-18 实测：`controls-stable` 4 个开关 3 秒无变化；`controls-toggle` 写入 1→0→1；`sms-send` 状态「已回复 10010」，会话出现「已发送，流量查询」，设备 `get_sms_data` 回读 29 条；`sms-poll` 的「同步 HH:mm:ss」在 7 秒内更新。
