@@ -6,7 +6,7 @@ import FHCPECore
 /// callbacks so the layout can be rendered (and screenshot-tested) without a session.
 public struct ShellView: View {
     public enum Route: Equatable, Sendable {
-        case connect, main, cellular
+        case connect, main, cellular, about, ddns, portMapping
     }
 
     @Bindable public var model: ShellModel
@@ -34,8 +34,17 @@ public struct ShellView: View {
 
     private var content: some View {
         VStack(spacing: 0) {
-            // No global header: the panel opens straight onto the page, and the top inset
-            // keeps the first row clear of the popover arrow.
+            if model.route != .about {
+                Text("FiberHome CPE Manager")
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.9)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, Theme.contentPadding)
+                    .frame(height: Theme.globalTitleHeight, alignment: .top)
+                    .accessibilityAddTraits(.isHeader)
+            }
             if model.route == .connect {
                 ConnectPage(address: $model.draftAddress, username: $model.draftUsername,
                             password: $model.draftPassword,
@@ -51,10 +60,10 @@ public struct ShellView: View {
                 // sat flush against the panel edge. The canvas now *derives* its height from
                 // the chrome, so all four margins are exactly 16 pt.
                 canvas
-                    .frame(height: Theme.canvasHeight)
+                    .frame(height: Theme.canvasHeight - (model.route == .about ? 0 : Theme.globalTitleHeight))
                 BottomGlassTabBar(items: Self.tabItems, selection: tabSelection,
                                   deviceCount: model.data.isLive ? model.data.devices.count : nil,
-                                  unread: model.threads.reduce(0) { $0 + $1.unreadCount })
+                                  unread: model.data.isLive ? model.threads.reduce(0) { $0 + $1.unreadCount } : 0)
                     .padding(.top, Theme.tabBarGap)
                     .padding(.bottom, Theme.tabBarBottomInset)
             }
@@ -76,6 +85,12 @@ public struct ShellView: View {
             model.smsRoute = .threads
             model.selectedThreadID = nil
             if model.route == .cellular { model.closeCellular() }
+            if model.route == .ddns { model.closeDDNS() }
+            if model.route == .portMapping { model.closePortMapping() }
+            if model.route == .about {
+                model.closeAbout()
+                if model.route != .connect { model.route = .main }
+            }
         })
     }
 
@@ -84,34 +99,75 @@ public struct ShellView: View {
             switch model.route {
             case .connect:
                 EmptyView()
+            case .about:
+                AboutPage(onBack: model.closeAbout)
+            case .ddns:
+                DDNSPage(entries: model.data.isLive ? model.ddnsEntries : [],
+                         wans: model.data.isLive ? model.wanConnections : [],
+                         busy: model.advancedBusy, isLive: model.data.isLive,
+                         status: model.advancedStatus, statusIsError: model.advancedStatusIsError,
+                         onBack: model.closeDDNS, onReload: model.reloadDDNS,
+                         onSave: model.saveDDNS, onDelete: model.deleteDDNS,
+                         onToggle: model.setDDNSEnabled)
+            case .portMapping:
+                PortMappingPage(entries: model.data.isLive ? model.portMappings : [],
+                                wans: model.data.isLive ? model.wanConnections : [],
+                                busy: model.advancedBusy, isLive: model.data.isLive,
+                                status: model.advancedStatus, statusIsError: model.advancedStatusIsError,
+                                onBack: model.closePortMapping, onReload: model.reloadPortMappings,
+                                onAdd: model.addPortMapping, onDelete: model.deletePortMapping,
+                                onToggle: model.setPortMappingEnabled)
             case .cellular:
-                CellularDetailPage(data: model.data, cells: model.cells, lockMode: model.lockMode,
+                CellularDetailPage(data: model.data, cells: model.data.isLive ? model.cells : [], lockMode: model.data.isLive ? model.lockMode : .unknown,
                                    lockBusy: model.lockBusy, onBack: model.closeCellular,
                                    onRefreshCells: model.refreshCells, onLockCurrent: model.applyLock,
-                                   initialTab: model.cellularTab)
+                                   initialTab: model.cellularTab,
+                                   lockState: model.data.isLive ? model.radioLocks : nil,
+                                   onSetCellLockEnabled: model.setCellLockEnabled,
+                                   onSetBandLockEnabled: model.setBandLockEnabled,
+                                   onAddLockedCell: model.addLockedCell,
+                                   onUpdateLockedCell: model.updateLockedCell,
+                                   onDeleteLockedCell: model.deleteLockedCell,
+                                   onDisableLocks: model.disableLocks)
+                    .overlay(alignment: .bottom) {
+                        if let status = model.lockStatus {
+                            StatusBanner(text: status, tone: model.lockStatusIsError ? .error : .success)
+                                .padding(.horizontal, Theme.contentPadding)
+                                .padding(.bottom, 6)
+                        }
+                    }
             case .main:
                 switch model.tab {
                 case 1:
                     DevicesPage(devices: model.devices, isLive: model.data.isLive,
                                 query: $model.searchQuery, filter: $model.accessFilter,
-                                onReload: model.refreshNow)
+                                onReload: model.refreshNow, onReserveIP: model.reserveIP)
                 case 2:
-                    ControlsPage(settings: model.settings,
+                    ControlsPage(settings: model.data.isLive ? model.settings : nil,
                                  busy: model.settingsBusy, status: model.settingsStatus,
                                  statusIsError: model.settingsStatusIsError,
+                                 isLive: model.data.isLive,
                                  onToggleSSID: model.toggleSSID,
                                  onRenameSSID: model.renameSSID,
                                  onSaveReboot: model.saveReboot,
                                  onSaveLED: model.saveLED,
                                  onSaveFan: model.saveFan,
                                  switchingTo: model.uplinkSwitchTarget,
-                                 onSwitchUplink: model.switchUplink)
+                                 onSwitchUplink: model.switchUplink,
+                                 mobile: model.data.isLive ? model.mobileNetwork : nil,
+                                 onSetAirplaneMode: model.setAirplaneMode,
+                                 onSetCellularData: model.setCellularData,
+                                 onSaveAntenna: model.saveAntenna,
+                                 ddnsCount: model.data.isLive && model.ddnsLoaded ? model.ddnsEntries.count : nil,
+                                 portMappingCount: model.data.isLive && model.portMappingsLoaded ? model.portMappings.count : nil,
+                                 onOpenDDNS: model.openDDNS,
+                                 onOpenPortMapping: model.openPortMapping)
                 case 3:
                     SMSPage(threads: model.threads, route: model.smsRoute,
                             selectedThread: model.threads.first { $0.id == model.selectedThreadID },
                             busy: model.smsBusy, status: model.smsStatus,
                             statusIsError: model.smsStatusIsError,
-                            lastSync: model.smsLastSync,
+                            lastSync: model.smsLastSync, isLive: model.data.isLive,
                             draftNumber: $model.draftNumber, draftBody: $model.draftBody,
                             replyBody: $model.replyBody,
                             onReload: model.reloadMessages, onSend: model.sendSMS,
@@ -157,14 +213,29 @@ public struct ShellView: View {
 @MainActor @Observable public final class ShellModel {
     public var route: ShellView.Route
     public var tab: Int
-    public var data: PageData
+    public var data: PageData {
+        didSet { if !data.isLive { clearVolatilePages() } }
+    }
     public var devices: [ConnectedDevice]
     public var cells: [CellRecord]
     public var lockMode: LockMode
     public var lockBusy = false
+    public var radioLocks: RadioLockState?
+    public var lockStatus: String?
+    public var lockStatusIsError = false
     /// Which segment the cellular page opens on (renderer/test seam).
     public var cellularTab = 0
     public var busy = false
+
+    public var mobileNetwork: MobileNetworkState?
+    public var wanConnections: [WANConnectionRef] = []
+    public var ddnsEntries: [DDNSEntry] = []
+    public var portMappings: [PortMappingEntry] = []
+    public var ddnsLoaded = false
+    public var portMappingsLoaded = false
+    public var advancedBusy = false
+    public var advancedStatus: String?
+    public var advancedStatusIsError = false
 
     public var draftAddress: String
     public var draftUsername: String
@@ -203,6 +274,29 @@ public struct ShellView: View {
     public var connect: () -> Void = {}
     public var openCellular: () -> Void = {}
     public var closeCellular: () -> Void = {}
+    public var closeAbout: () -> Void = {}
+    public var setAirplaneMode: (Bool) -> Void = { _ in }
+    public var setCellularData: (Bool) -> Void = { _ in }
+    public var saveAntenna: (Bool, AntennaType) -> Void = { _, _ in }
+    public var openDDNS: () -> Void = {}
+    public var closeDDNS: () -> Void = {}
+    public var reloadDDNS: () -> Void = {}
+    public var saveDDNS: (DDNSEntry?, DDNSInput) async throws -> Void = { _, _ in throw CPEError.authentication }
+    public var deleteDDNS: (DDNSEntry) async throws -> Void = { _ in throw CPEError.authentication }
+    public var setDDNSEnabled: (DDNSEntry, Bool) async throws -> Void = { _, _ in throw CPEError.authentication }
+    public var openPortMapping: () -> Void = {}
+    public var closePortMapping: () -> Void = {}
+    public var reloadPortMappings: () -> Void = {}
+    public var addPortMapping: (PortMappingInput) async throws -> Void = { _ in throw CPEError.authentication }
+    public var deletePortMapping: (PortMappingEntry) async throws -> Void = { _ in throw CPEError.authentication }
+    public var setPortMappingEnabled: (PortMappingEntry, Bool) async throws -> Void = { _, _ in throw CPEError.authentication }
+    public var setCellLockEnabled: (Bool) -> Void = { _ in }
+    public var setBandLockEnabled: (Bool, [Int], [Int]) -> Void = { _, _, _ in }
+    public var addLockedCell: (LockedCell) -> Void = { _ in }
+    public var updateLockedCell: (LockedCell) -> Void = { _ in }
+    public var deleteLockedCell: (LockedCell) -> Void = { _ in }
+    public var disableLocks: () -> Void = {}
+    public var reserveIP: (@MainActor (ConnectedDevice, String) async throws -> Void)?
     public var refreshCells: () -> Void = {}
     public var applyLock: (CellRecord?) -> Void = { _ in }
     public var reloadMessages: () -> Void = {}
@@ -235,5 +329,21 @@ public struct ShellView: View {
         self.cells = cells; self.lockMode = lockMode
         self.draftAddress = address; self.draftUsername = username; self.draftPassword = password
         self.menuBarStyle = menuBarStyle
+        if !data.isLive { clearVolatilePages() }
+    }
+
+    /// Device-derived values and SMS drafts belong to one live connection, in memory.
+    /// Reset every page together so no navigation path can expose an old reading.
+    private func clearVolatilePages() {
+        devices = []; cells = []; settings = nil; radioLocks = nil; lockMode = .unknown
+        threads = []; selectedThreadID = nil; smsRoute = .threads; smsLastSync = nil
+        draftNumber = ""; draftBody = ""; replyBody = ""
+        smsBusy = false; settingsBusy = false; lockBusy = false; uplinkSwitchTarget = nil
+        smsStatus = nil; smsStatusIsError = false
+        settingsStatus = nil; settingsStatusIsError = false
+        lockStatus = nil; lockStatusIsError = false
+        mobileNetwork = nil; wanConnections = []; ddnsEntries = []; portMappings = []
+        ddnsLoaded = false; portMappingsLoaded = false
+        advancedBusy = false; advancedStatus = nil; advancedStatusIsError = false
     }
 }

@@ -37,6 +37,33 @@ struct GlassField: View {
 /// Identifies which connection field owns focus.
 enum ConnectionField: Hashable { case address, username, password }
 
+/// Same capsule styling as `GlassField`, without the connection-form focus enum, so the
+/// DDNS / port-mapping sheets can reuse it.
+struct PanelTextField: View {
+    @Binding var text: String
+    let placeholder: String
+    var secure = false
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        Group {
+            if secure { SecureField(placeholder, text: $text) }
+            else { TextField(placeholder, text: $text) }
+        }
+        .textFieldStyle(.plain)
+        .font(.system(size: 11.5))
+        .padding(.horizontal, 10)
+        .frame(height: 28)
+        .background(Theme.surface, in: CapsulePanelShape(maxRadius: 999))
+        .overlay(
+            CapsulePanelShape(maxRadius: 999)
+                .strokeBorder(focused ? Color.accentColor.opacity(0.65) : Theme.hairline,
+                              lineWidth: focused ? 1 : 0.5)
+        )
+        .focused($focused)
+    }
+}
+
 /// Primary action. macOS 27 draws buttons as capsules, so the radius is height / 2.
 ///
 /// A `ButtonStyle` must never apply `.buttonStyle(...)` to its own label: doing so made the

@@ -349,10 +349,11 @@ public struct LG6851Adapter: DeviceAdapter {
 
     static func lockMode(cellEnable: String?, cells: [LockedCell],
                          bandEnable: String?, lte: String?, nr: String?) -> LockMode {
+        if cellEnable == "1" && bandEnable == "1" { return .unknown }
         if cellEnable == "1" {
             // The firmware locks onto the candidate list; the first entry summarises it.
-            let first = cells.first
-            return .cell(rat: first?.act ?? 2, arfcn: first?.arfcn ?? 0, pci: first?.pci ?? 0)
+            guard let first = cells.first else { return .unknown }
+            return .cell(rat: first.act, arfcn: first.arfcn, pci: first.pci)
         }
         if bandEnable == "1" {
             return .bands(lte: intList(lte), nr: intList(nr))
@@ -376,8 +377,13 @@ public struct LG6851Adapter: DeviceAdapter {
     static func parseLockedCells(_ r: JSONValue) -> [LockedCell] {
         guard case .array(let rows) = r["data"] else { return [] }
         return rows.enumerated().compactMap { offset, row in
-            guard let arfcn = row["arfcn"].text.flatMap(Int.init),
-                  let pci = row["pci"].text.flatMap(Int.init) else { return nil }
+            guard let arfcn = row["arfcn"].text.flatMap(Int.init) else { return nil }
+            let pci: Int?
+            if row["pci"] == .string("") { pci = nil }
+            else {
+                guard let value = row["pci"].text.flatMap(Int.init), (0...2000).contains(value) else { return nil }
+                pci = value
+            }
             let index = row["child_node_idx"].text.flatMap(Int.init) ?? (offset + 1)
             return LockedCell(index: index, act: row["act"].text.flatMap(Int.init) ?? 2, arfcn: arfcn, pci: pci)
         }

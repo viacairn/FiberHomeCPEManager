@@ -9,15 +9,19 @@ public struct DevicesPage: View {
     @Binding public var query: String
     @Binding public var filter: AccessFilter
     public let onReload: () -> Void
+    public let onReserveIP: (@MainActor (ConnectedDevice, String) async throws -> Void)?
     @State private var glyphs = DeviceGlyphStore()
     @State private var glyphRevision = 0
+    @State private var editingDevice: ConnectedDevice?
 
     public init(devices: [ConnectedDevice], isLive: Bool,
                 query: Binding<String>, filter: Binding<AccessFilter>,
-                onReload: @escaping () -> Void = {}) {
+                onReload: @escaping () -> Void = {},
+                onReserveIP: (@MainActor (ConnectedDevice, String) async throws -> Void)? = nil) {
         self.devices = devices; self.isLive = isLive
         self._query = query; self._filter = filter
         self.onReload = onReload
+        self.onReserveIP = onReserveIP
     }
 
     public enum AccessFilter: String, CaseIterable, Identifiable, Sendable {
@@ -42,6 +46,7 @@ public struct DevicesPage: View {
     }
 
     public var filtered: [ConnectedDevice] {
+        guard isLive else { return [] }
         let q = query.trimmingCharacters(in: .whitespaces)
         return devices.filter { device in
             guard filter.matches(device) else { return false }
@@ -59,6 +64,12 @@ public struct DevicesPage: View {
                 .padding(.top, 0)
             list
                 .padding(.top, 8)
+        }
+        .sheet(item: $editingDevice) { device in
+            DHCPReservationEditor(device: device, isLive: isLive, onSave: onReserveIP)
+        }
+        .onChange(of: isLive) { _, live in
+            if !live { editingDevice = nil }
         }
     }
 
@@ -106,7 +117,7 @@ public struct DevicesPage: View {
         return HStack(spacing: 3) {
             ForEach(AccessFilter.allCases) { item in
                 let selected = filter == item
-                let count = devices.filter(item.matches).count
+                let count = isLive ? devices.filter(item.matches).count : 0
                 Button {
                     withAnimation(Theme.snap) { filter = item }
                 } label: {
@@ -150,7 +161,9 @@ public struct DevicesPage: View {
 
     private var list: some View {
         ScrollView(.vertical) {
-            if filtered.isEmpty {
+            if !isLive {
+                Color.clear.frame(height: 0)
+            } else if filtered.isEmpty {
                 emptyState
                     .padding(.horizontal, Theme.contentPadding)
             } else {
@@ -159,6 +172,14 @@ public struct DevicesPage: View {
                         DeviceRow(device: device,
                                   symbol: glyphs.glyph(for: device)?.symbol ?? device.systemSymbol)
                             .contextMenu {
+                                Button {
+                                    editingDevice = device
+                                } label: {
+                                    Label("设置固定 IP…", systemImage: "pin")
+                                }
+                                .disabled(onReserveIP == nil
+                                          || device.mac?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false)
+                                Divider()
                                 Menu("设置图标") {
                                     ForEach(DeviceGlyph.allCases, id: \.self) { glyph in
                                         Button {
@@ -189,7 +210,12 @@ public struct DevicesPage: View {
         }
         .scrollIndicators(.automatic)
         .onAppear { glyphs.prune(keeping: devices) }
-        .onChange(of: devices) { _, new in glyphs.prune(keeping: new) }
+        .onChange(of: devices) { _, new in
+            glyphs.prune(keeping: new)
+            if let editingDevice, !new.contains(where: { $0.id == editingDevice.id }) {
+                self.editingDevice = nil
+            }
+        }
         .id(glyphRevision)
     }
 
@@ -212,6 +238,112 @@ public struct DevicesPage: View {
         }
         .frame(maxWidth: .infinity)
         .padding(.top, 46)
+    }
+}
+
+private struct DHCPReservationEditor: View {
+    let device: ConnectedDevice
+    let isLive: Bool
+    let onSave: (@MainActor (ConnectedDevice, String) async throws -> Void)?
+    @Environment(\.dismiss) private var dismiss
+    @State private var ip: String
+    @State private var saving = false
+    @State private var saveError: String?
+    @FocusState private var ipFocused: Bool
+
+    init(device: ConnectedDevice, isLive: Bool,
+         onSave: (@MainActor (ConnectedDevice, String) async throws -> Void)?) {
+        self.device = device
+        self.isLive = isLive
+        self.onSave = onSave
+        self._ip = State(initialValue: device.ip)
+    }
+
+    private var validationError: String? {
+        do {
+            _ = try DHCPReservation(mac: device.mac ?? "", ip: ip)
+            return nil
+        } catch {
+            return error.localizedDescription
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Theme.Space.m) {
+            PanelHeading("设置固定 IP")
+            VStack(alignment: .leading, spacing: 4) {
+                Text(device.name)
+                    .font(.system(size: 12.5, weight: .semibold))
+                    .lineLimit(1)
+                Text(device.mac ?? "—")
+                    .font(.system(size: 10.5).monospaced())
+                    .foregroundStyle(Theme.inkSecondary)
+                    .textSelection(.enabled)
+            }
+            VStack(alignment: .leading, spacing: 6) {
+                Text("IPv4 地址")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(Theme.inkSecondary)
+                TextField("192.168.8.120", text: $ip)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 11.5).monospacedDigit())
+                    .padding(.horizontal, 10)
+                    .frame(height: 28)
+                    .background(Theme.surface, in: Capsule())
+                    .overlay(Capsule().strokeBorder(ipFocused ? Color.accentColor.opacity(0.65) : Theme.hairlineStrong,
+                                                   lineWidth: 0.75))
+                    .focused($ipFocused)
+                    .disabled(saving)
+                    .accessibilityLabel("固定 IPv4 地址")
+                    .onSubmit(save)
+                Text("在路由器中为此设备保留 IP，续租或重新连接后生效。")
+                    .font(.system(size: 10))
+                    .foregroundStyle(Theme.inkMuted)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if let error = saveError ?? validationError {
+                StatusBanner(text: error, tone: .error)
+            }
+            HStack(spacing: Theme.Space.s) {
+                Button("取消") { dismiss() }
+                    .buttonStyle(.plain)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(Theme.inkSecondary)
+                    .keyboardShortcut(.cancelAction)
+                    .disabled(saving)
+                Spacer(minLength: 0)
+                if saving {
+                    ProgressView().controlSize(.mini)
+                }
+                Button(action: save) {
+                    Text(saving ? "正在保存…" : "保存固定 IP")
+                        .frame(width: 110)
+                }
+                .buttonStyle(PrimaryButtonStyle())
+                .keyboardShortcut(.defaultAction)
+                .disabled(!isLive || saving || onSave == nil || validationError != nil)
+            }
+        }
+        .padding(Theme.contentPadding)
+        .frame(width: Theme.compactWidth - 32)
+        .interactiveDismissDisabled(saving)
+        .onAppear { ipFocused = true }
+        .onChange(of: ip) { _, _ in saveError = nil }
+    }
+
+    private func save() {
+        guard isLive, !saving, validationError == nil, let onSave else { return }
+        saving = true
+        saveError = nil
+        Task { @MainActor in
+            defer { saving = false }
+            do {
+                try await onSave(device, ip.trimmingCharacters(in: .whitespacesAndNewlines))
+                dismiss()
+            } catch {
+                saveError = error.localizedDescription
+            }
+        }
     }
 }
 

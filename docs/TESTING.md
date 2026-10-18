@@ -1,6 +1,6 @@
 # 测试流程
 
-两条命令，一次跑完，不重复、不靠人工数结果。
+两条命令分别验证纯逻辑与真实界面。当前轮次结果见 [完成情况审计](VERIFICATION-2026-10-18.md)。
 
 ```bash
 ./script/test.sh                      # 单元测试（秒级）
@@ -16,20 +16,22 @@ CPE_PASS='…' ./script/ui_matrix.sh    # 完整 UI 矩阵（单次，约 90 秒
 
 ## 1. 单元测试
 
-`script/test.sh` 跑 `swift test`，共 **85 项**，覆盖协议解析、菜单栏几何、图标双别名、短信发送合并、密码全角拦截、5 秒同步策略、设置写入等纯逻辑。**不碰 UI，不碰设备**，所以永远先跑它。
+`script/test.sh` 跑 `swift test`，当前共 **142 项 / 16 个测试套件**，覆盖协议解析、认证失效、菜单栏几何、短信解析与发送合并、密码全角拦截、5 秒同步策略、断线页面清空、零速率、DHCP 保留校验与读回、小区/频段互斥和失败中止。测试使用本地模拟响应，不访问真实 CPE；页面状态测试不操作桌面。
 
 ## 2. UI 矩阵
 
 `script/ui_matrix.sh` 是**一次运行、一次汇总**：脚本自己构建探针、按阶段启动应用、逐场景运行，最后打印总数与失败列表，退出码即结果（旧版即使有 FAIL 也返回 0）。
 
+运行前检查探针进程的 macOS 辅助功能授权。没有授权会输出 `BLOCKED` 并返回 **2**，不会重启应用或把无法读取控件误报为产品失败。测试失败返回 **1**，验证通过返回 **0**。本轮环境的该项检查为 BLOCKED，未将真实界面矩阵记为通过。
+
 ### 阶段与顺序
 
 | 阶段 | 场景 | 为什么在这个位置 |
 | --- | --- | --- |
-| 1 · 登录页 | `login-empty`、`login-extra`、`login-fullwidth`、`esc`、`cmdw`、`external-click` | 不需要会话，必须在登录前跑 |
+| 1 · 登录页 | `login-empty`、`login-extra`、`login-fullwidth`、`esc`、`cmdw`、`external-click`、`about` | 不需要会话，必须在登录前跑 |
 | 可达性 | `curl http://$CPE_HOST/` | 设备不在本机网段时，登录必然失败；先判定再决定是否跑已连接页 |
 | 2 · 登录 | 真实登录一次 | 只登一次，后续全部复用同一会话 |
-| 3 · 已连接 | `contextmenu`、`styles`、`keys`、`devices-filter-select`、`a11y`、`controls`、`sms`、`sms-poll` | 需要在线数据 |
+| 3 · 已连接 | `contextmenu`、`styles`、`keys`、`devices-filter-select`、`a11y`、`controls`、`fan-layout`、`sms`、`sms-poll`、`relogin` | 需要在线数据；重新登录放在最后 |
 | 4 · 退出 | `power`、`cmdq` | 会终止进程，因此各自新开实例，必须最后跑 |
 
 ### 覆盖对照
@@ -44,13 +46,16 @@ CPE_PASS='…' ./script/ui_matrix.sh    # 完整 UI 矩阵（单次，约 90 秒
 | §8.2 点击外部关闭 | `external-click` | 面板消失 |
 | §8.2 Esc / ⌘W | `esc`、`cmdw` | 关闭面板、不退出应用；二级页 Esc 返回 |
 | §8.2 ⌘1–⌘4 | `keys` | 四个页签分别落到正确页面 |
-| §3–§7 页面渲染 | `keys` 的落点断言 | 概览「蜂窝信息」、设备「全部」、控制「上行运行模式」、短信「写短信」 |
-| §5 设备筛选 | `devices-filter-select` | 胶囊弹出四个选项，切到 5G 后列表与计数同步 |
+| §3–§7 页面渲染 | `keys` 的落点断言 | 概览「蜂窝信息」、设备「全部」、控制「上行运行模式」、短信「新消息」 |
+| §5 设备筛选 | `devices-filter-select` | 四个常驻选项，切到 5G 后列表与计数同步 |
 | §6 控制页 | `controls` | 模式矩阵、主 SSID、备用通道折叠/展开、重启手风琴 |
+| §6 风扇布局 | `fan-layout` | 打开浮窗，三行标签、且仅一个已选择；关闭浮窗，不写设备 |
 | §7 短信 | `sms` | 列表/详情均无流量·积分胶囊、无快捷芯片、内联回复框存在 |
 | §7 短信 5 秒同步 | `sms-poll` | 进入短信页后 7 秒内同步时间戳发生更新 |
 | §8.4 无障碍 | `a11y` | 六个页面（四页签 + 蜂窝详情 + 会话）内所有按钮/开关/单选必须有名称；滚动条系统控件除外 |
 | §8.2 退出 | `power`、`cmdq` | 右键菜单退出、⌘Q 均能结束进程 |
+| 关于页 | `about` | 右键进入关于、显示隐私说明、返回连接页 |
+| 重新登录 | `relogin` | 右键重新登录，等待受保护读取恢复 |
 
 `a11y` 还带两个防假通过条件：应用未运行直接 FAIL；扫到的页面少于 6 个也 FAIL。
 
@@ -74,14 +79,24 @@ summary
 这些场景需要 `CPE_PASS`，但不放进默认矩阵（有的会写设备或发短信）：
 
 ```bash
-.build/ui_probe devices-filter-select   # 胶囊筛选 5G → 3/8 台 → 还原
+.build/ui_probe devices-filter-select   # 切换 5G 筛选并还原
 .build/ui_probe controls-stable         # 四个开关采样 3 秒，值/可用性不变
 .build/ui_probe controls-toggle         # 关/开指示灯，验证写入与还原
 .build/ui_probe sms-send                # 给 10010 发「流量查询」，验证状态与已发送气泡
 .build/ui_probe sms-poll                # 停留短信页 7 秒，确认同步时间戳更新
 ```
 
-2026-10-18 实测：`controls-stable` 4 个开关 3 秒无变化；`controls-toggle` 写入 1→0→1；`sms-send` 状态「已回复 10010」，会话出现「已发送，流量查询」，设备 `get_sms_data` 回读 29 条；`sms-poll` 的「同步 HH:mm:ss」在 7 秒内更新。
+以下为本轮融合前的历史实测，不能替代当前构建的界面验收：2026-10-18 的 `controls-stable` 4 个开关 3 秒无变化；`controls-toggle` 写入 1→0→1；`sms-send` 状态「已回复 10010」，会话出现「已发送，流量查询」，设备 `get_sms_data` 回读 29 条；`sms-poll` 的「同步 HH:mm:ss」在 7 秒内更新。本轮没有再次发送短信。
+
+### 无设备的页面渲染
+
+```bash
+export SDKROOT=/Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk
+swift run UIRender render/reliability-final
+swift run UIRender render/reliability-final-dark --dark
+```
+
+每套生成 20 张真实 SwiftUI 组件的夹具截图，包括关于、锁定配置以及设备/短信/控制/蜂窝断线页。渲染验证布局，不代表真实菜单、钥匙串或网络恢复交互已通过。
 
 ## 3. 设计约束
 
@@ -96,6 +111,7 @@ summary
 
 | 输出 | 含义 |
 | --- | --- |
+| `BLOCKED …辅助功能授权` | 探针进程无法访问桌面控件，矩阵未执行；需要在系统设置中允许运行探针的宿主访问辅助功能 |
 | `设备不可达` + 大量 SKIP | 网络问题，先确认 Mac 在 CPE 网段 |
 | `The Internet connection appears to be offline` | macOS 本地网络权限被拒；在系统设置 → 隐私与安全性 → 本地网络允许 FiberHomeCPEManager |
 | `FAIL UI 登录` 且 `page texts` 含 `用户名或密码错误` | 固件拒绝了凭据；连续错误会触发 1 分钟锁定 |

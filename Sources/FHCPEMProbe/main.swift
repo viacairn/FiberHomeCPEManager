@@ -21,6 +21,10 @@ struct Probe {
             exit(1)
         }
 
+        if CommandLine.arguments.contains("--session-audit") {
+            await auditSessions(address: address, username: user, password: password)
+            return
+        }
         let session = DeviceSession(address: address)
         do {
             _ = try await session.connect(username: user, password: password)
@@ -104,6 +108,33 @@ struct Probe {
             print("read failed: \(error)")
         }
         await session.close()
+    }
+
+    /// Explicit development diagnostic. Uses two independent in-memory cookie jars,
+    /// reads only, and prints no credentials, cookies, tokens, or message contents.
+    static func auditSessions(address: DeviceAddress, username: String, password: String) async {
+        let first = LocalTransport(address: address), second = LocalTransport(address: address)
+        do {
+            try await LG6851Adapter(rpc: first).login(username: username, password: password)
+            _ = try await first.call("get_sms_data", data: .null, publicAccess: false)
+            print("entry A: login and SMS read succeeded")
+            try await LG6851Adapter(rpc: second).login(username: username, password: password)
+            print("entry B: login succeeded")
+            if CommandLine.arguments.contains("--session-audit-wait") {
+                print("ready for browser login")
+                _ = readLine()
+            }
+            for method in ["get_sms_data", "get_value_by_xmlnode"] {
+                do {
+                    let data: JSONValue = method == "get_sms_data" ? .null : .strings(["model": "DeviceInfo.ModelName"])
+                    _ = try await first.call(method, data: data, publicAccess: false)
+                    print("entry A after B / \(method): still authenticated")
+                } catch {
+                    print("entry A after B / \(method): \(error)")
+                }
+            }
+        } catch { print("session audit failed: \(error)") }
+        await first.close(); await second.close()
     }
 }
 

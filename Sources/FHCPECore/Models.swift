@@ -412,7 +412,7 @@ public struct DeviceSnapshot: Sendable, Codable, Equatable {
 }
 
 public enum LockMode: Equatable, Sendable, Codable {
-    case automatic, bands(lte: [Int], nr: [Int]), cell(rat: Int, arfcn: Int, pci: Int), unknown
+    case automatic, bands(lte: [Int], nr: [Int]), cell(rat: Int, arfcn: Int, pci: Int?), unknown
     public var title: String {
         switch self {
         case .automatic: "自动选网"
@@ -432,11 +432,14 @@ public struct LockedCell: Sendable, Codable, Equatable, Identifiable {
     public var index: Int
     public var act: Int
     public var arfcn: Int
-    public var pci: Int
+    /// A nil PCI is the stock page's empty string: match any PCI on this frequency.
+    public var pci: Int?
     public var id: Int { index }
     public var techTitle: String { act == 1 ? "4G LTE" : "5G NR" }
+    public var pciWireValue: String { pci.map(String.init) ?? "" }
+    public var pciDisplay: String { pci.map(String.init) ?? "任意" }
 
-    public init(index: Int, act: Int, arfcn: Int, pci: Int) {
+    public init(index: Int, act: Int, arfcn: Int, pci: Int?) {
         self.index = index; self.act = act; self.arfcn = arfcn; self.pci = pci
     }
 }

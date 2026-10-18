@@ -300,7 +300,7 @@ public struct LG6851LockBackend: LockBackend {
                     "url": .string(LG6851Adapter.lockCellList),
                     "setNode": .object([
                         "url": .strings(["act": "act", "arfcn": "arfcn", "pci": "pci"]),
-                        "value": .strings(["act": String(rat), "arfcn": String(arfcn), "pci": String(pci)])
+                        "value": .strings(["act": String(rat), "arfcn": String(arfcn), "pci": pci.map(String.init) ?? ""])
                     ])
                 ]), publicAccess: false)
                 try Self.check(r)

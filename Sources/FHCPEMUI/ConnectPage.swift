@@ -63,12 +63,10 @@ public struct ConnectPage: View {
         return value
     }
 
-    /// The message under the form: an explicit empty-password hint wins over the network
-    /// reminder, and a connection error wins over both.
-    private var statusLine: (text: String, isError: Bool) {
-        if let error { return (error, true) }
-        if emptyPasswordHint { return ("请输入密码后再连接", true) }
-        return ("请连接到设备所在的局域网", false)
+    private var statusLine: String? {
+        if let error { return error }
+        if emptyPasswordHint { return "请输入密码后再连接" }
+        return nil
     }
 
     public var body: some View {
@@ -87,11 +85,6 @@ public struct ConnectPage: View {
                             .font(.system(size: 19, weight: .medium))
                             .foregroundStyle(Color.accentColor)
                     }
-                    Text("FiberHome CPE Manager")
-                        .font(.system(size: 16, weight: .semibold))
-                    Text("烽火 5G CPE 原生状态栏管理工具")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
                 }
 
                 Panel(padding: 14, spacing: 12) {
@@ -184,24 +177,18 @@ public struct ConnectPage: View {
                     .keyboardShortcut(.defaultAction)
                 }
 
-                HStack(spacing: 5) {
-                    Image(systemName: statusLine.isError ? "exclamationmark.circle" : "info.circle")
-                        .font(.system(size: 9.5))
-                    Text(statusLine.text)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .multilineTextAlignment(.leading)
-                }
-                .font(.system(size: 10))
-                .foregroundStyle(statusLine.isError ? AnyShapeStyle(Theme.negative) : AnyShapeStyle(.tertiary))
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .animation(Theme.snap, value: statusLine.text)
-                .textSelection(.enabled)
-
-                if !statusLine.isError {
-                    Text("管理地址通常印在设备背面，只需填 IP，无需 http://")
-                        .font(.system(size: 9.5))
-                        .foregroundStyle(.tertiary)
+                if let statusLine {
+                    HStack(spacing: 5) {
+                        Image(systemName: "exclamationmark.circle")
+                            .font(.system(size: 9.5))
+                        Text(statusLine)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .multilineTextAlignment(.leading)
+                    }
+                        .font(.system(size: 10))
+                        .foregroundStyle(Theme.negative)
                         .frame(maxWidth: .infinity, alignment: .leading)
+                        .textSelection(.enabled)
                 }
             }
             .padding(.horizontal, Theme.contentPadding)

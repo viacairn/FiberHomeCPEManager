@@ -22,6 +22,7 @@ public enum Theme {
     /// above the first row, 16 pt between the content and the tab bar, and 16 pt below the
     /// tab bar. Four equal sides, measured in the rendered PNGs.
     public static let topInset: CGFloat = 16
+    public static let globalTitleHeight: CGFloat = 34
     /// Space between the page canvas and the floating tab bar.
     public static let tabBarGap: CGFloat = 16
     /// Space between the floating tab bar and the bottom edge of the panel.

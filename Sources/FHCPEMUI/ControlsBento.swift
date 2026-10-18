@@ -13,6 +13,7 @@ public struct ControlsPage: View {
     public let busy: Bool
     public let status: String?
     public let statusIsError: Bool
+    public let isLive: Bool
     public let onToggleSSID: (WiFiNetwork, Bool) -> Void
     public let onRenameSSID: (WiFiNetwork, String) -> Void
     public let onSaveReboot: (Bool, String, String) -> Void
@@ -20,61 +21,128 @@ public struct ControlsPage: View {
     public let onSaveFan: (FanMode) -> Void
     public let switchingTo: UplinkTarget?
     public let onSwitchUplink: (UplinkTarget) -> Void
+    public let mobile: MobileNetworkState?
+    public let onSetAirplaneMode: (Bool) -> Void
+    public let onSetCellularData: (Bool) -> Void
+    public let onSaveAntenna: (Bool, AntennaType) -> Void
+    public let ddnsCount: Int?
+    public let portMappingCount: Int?
+    public let onOpenDDNS: () -> Void
+    public let onOpenPortMapping: () -> Void
 
     public init(settings: DeviceSettings?, busy: Bool, status: String?,
-                statusIsError: Bool = false,
+                statusIsError: Bool = false, isLive: Bool = true,
                 onToggleSSID: @escaping (WiFiNetwork, Bool) -> Void,
                 onRenameSSID: @escaping (WiFiNetwork, String) -> Void,
                 onSaveReboot: @escaping (Bool, String, String) -> Void,
                 onSaveLED: @escaping (Bool) -> Void,
                 onSaveFan: @escaping (FanMode) -> Void = { _ in },
                 switchingTo: UplinkTarget? = nil,
-                onSwitchUplink: @escaping (UplinkTarget) -> Void = { _ in }) {
+                onSwitchUplink: @escaping (UplinkTarget) -> Void = { _ in },
+                mobile: MobileNetworkState? = nil,
+                onSetAirplaneMode: @escaping (Bool) -> Void = { _ in },
+                onSetCellularData: @escaping (Bool) -> Void = { _ in },
+                onSaveAntenna: @escaping (Bool, AntennaType) -> Void = { _, _ in },
+                ddnsCount: Int? = nil, portMappingCount: Int? = nil,
+                onOpenDDNS: @escaping () -> Void = {},
+                onOpenPortMapping: @escaping () -> Void = {}) {
         self.settings = settings; self.busy = busy; self.status = status
-        self.statusIsError = statusIsError
+        self.statusIsError = statusIsError; self.isLive = isLive
         self.onToggleSSID = onToggleSSID; self.onRenameSSID = onRenameSSID
         self.onSaveReboot = onSaveReboot; self.onSaveLED = onSaveLED; self.onSaveFan = onSaveFan
         self.switchingTo = switchingTo; self.onSwitchUplink = onSwitchUplink
+        self.mobile = mobile
+        self.onSetAirplaneMode = onSetAirplaneMode; self.onSetCellularData = onSetCellularData
+        self.onSaveAntenna = onSaveAntenna
+        self.ddnsCount = ddnsCount; self.portMappingCount = portMappingCount
+        self.onOpenDDNS = onOpenDDNS; self.onOpenPortMapping = onOpenPortMapping
     }
 
     @State private var showBackupWiFi = false
     @State private var rebootExpanded = false
     @State private var draftTime = "04:30"
     @State private var draftWeekday = "Everyday"
-    @State private var ledOn = true
     @State private var pendingUplink: UplinkTarget?
+    @State private var fanMenuOpen = false
 
     public var body: some View {
         VStack(spacing: 0) {
-            ScrollView(.vertical) {
-                VStack(alignment: .leading, spacing: Theme.Space.m) {
-                    uplinkSection
-                    wifiSection
-                    rebootSection
-                    hardwareSection
-                }
-                .padding(.horizontal, Theme.contentPadding)
-                .padding(.top, 0)
-                .padding(.bottom, Theme.contentPadding)
-            }
-            .scrollIndicators(.automatic)
-            if let status {
-                StatusBanner(text: status, tone: statusIsError ? .error : .success)
+            if isLive {
+                ScrollView(.vertical) {
+                    VStack(alignment: .leading, spacing: Theme.Space.m) {
+                        uplinkSection
+                        wifiSection
+                        rebootSection
+                        hardwareSection
+                        MobileNetworkSection(state: mobile, busy: busy,
+                                             onSetAirplane: onSetAirplaneMode,
+                                             onSetCellular: onSetCellularData,
+                                             onSaveAntenna: onSaveAntenna)
+                        NetworkServicesSection(ddnsCount: ddnsCount, portCount: portMappingCount,
+                                               onOpenDDNS: onOpenDDNS, onOpenPorts: onOpenPortMapping)
+                    }
                     .padding(.horizontal, Theme.contentPadding)
-                    .padding(.top, 6)
-                    .padding(.bottom, 8)
+                    .padding(.top, 0)
+                    .padding(.bottom, Theme.contentPadding)
+                }
+                .scrollIndicators(.automatic)
+                if let status {
+                    StatusBanner(text: status, tone: statusIsError ? .error : .success)
+                        .padding(.horizontal, Theme.contentPadding)
+                        .padding(.top, 6)
+                        .padding(.bottom, 8)
+                }
+            } else {
+                disconnectedState
             }
         }
-        .onChange(of: settings?.ledOn) { _, value in
-            if let value { ledOn = value }
+        .onChange(of: settings) { _, value in
+            guard isLive, let value else {
+                clearPendingControls()
+                return
+            }
+            if !rebootExpanded {
+                draftTime = value.rebootTime; draftWeekday = value.rebootWeekday
+            }
+        }
+        .onChange(of: isLive) { _, live in
+            if !live { clearPendingControls() }
         }
         .onAppear {
-            ledOn = settings?.ledOn ?? true
-            if let settings {
+            if isLive, let settings {
                 draftTime = settings.rebootTime.isEmpty ? "04:30" : settings.rebootTime
                 draftWeekday = settings.rebootWeekday.isEmpty ? "Everyday" : settings.rebootWeekday
             }
         }
+    }
+
+    private var disconnectedState: some View {
+        VStack(spacing: 0) {
+            PanelHeading("设备控制")
+                .padding(.horizontal, Theme.contentPadding)
+                .padding(.bottom, Theme.Space.s)
+            VStack(spacing: Theme.Space.s) {
+                Spacer(minLength: 0)
+                Image(systemName: "wifi.slash")
+                    .font(.system(size: 22, weight: .light))
+                    .foregroundStyle(Theme.inkMuted)
+                Text("设备已断开连接")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(Theme.inkSecondary)
+                Text("连接设备后可读取和调整设置")
+                    .font(Theme.footnote)
+                    .foregroundStyle(Theme.inkMuted)
+                    .multilineTextAlignment(.center)
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, Theme.contentPadding)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+
+    private func clearPendingControls() {
+        rebootExpanded = false; draftTime = ""; draftWeekday = ""
+        pendingUplink = nil; fanMenuOpen = false
     }
 
     private var fanTitle: String {
@@ -283,15 +351,20 @@ public struct ControlsPage: View {
                     Button {
                         withAnimation(Theme.snap) { rebootExpanded.toggle() }
                     } label: {
-                        VStack(alignment: .leading, spacing: 1.5) {
+                        HStack(alignment: .firstTextBaseline, spacing: 8) {
                             Text("定时重启").font(.system(size: 12, weight: .semibold))
-                            Text(rebootSummary).font(.system(size: 10, weight: .medium)).foregroundStyle(Theme.inkSecondary)
+                                .fixedSize()
+                            Text(rebootSummary)
+                                .font(.system(size: 10, weight: .medium).monospacedDigit())
+                                .foregroundStyle(Theme.inkSecondary)
+                                .lineLimit(1)
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
-                    .accessibilityLabel("定时重启，\(rebootSummary)，点击展开")
+                    .disabled(settings == nil)
+                    .accessibilityLabel("定时重启，\(rebootSummary)，点击\(rebootExpanded ? "收起" : "展开")")
 
                     Toggle("", isOn: Binding(
                         get: { settings?.rebootEnabled ?? false },
@@ -310,7 +383,7 @@ public struct ControlsPage: View {
                 .padding(.horizontal, 6)
                 .padding(.vertical, 6)
 
-                if rebootExpanded {
+                if rebootExpanded, settings != nil {
                     Rectangle().fill(Theme.hairline).frame(height: 0.5)
                         .padding(.horizontal, 6)
                         .padding(.vertical, 4)
@@ -377,7 +450,7 @@ public struct ControlsPage: View {
     }
 
     private var rebootSummary: String {
-        guard let settings else { return "读取中…" }
+        guard let settings else { return "—" }
         guard settings.rebootEnabled else { return "已关闭" }
         let day = settings.rebootWeekday.isEmpty ? "" : " · \(Self.weekdayLabel(settings.rebootWeekday))"
         return "\(settings.rebootTime)\(day)"
@@ -421,9 +494,8 @@ public struct ControlsPage: View {
                             .lineLimit(1)
                         Spacer(minLength: 0)
                         Toggle("", isOn: Binding(
-                            get: { settings != nil ? ledOn : false },
+                            get: { settings?.ledOn ?? false },
                             set: { value in
-                                ledOn = value
                                 onSaveLED(value)
                             }
                         ))
@@ -433,10 +505,6 @@ public struct ControlsPage: View {
                         .disabled(busy || settings == nil)
                         .accessibilityLabel("机身指示灯")
                     }
-                    Text(settings == nil ? "读取中…" : (ledOn ? "开启 · 关闭后熄灭" : "已关闭"))
-                        .font(.system(size: 9.5, weight: .medium))
-                        .foregroundStyle(Theme.inkSecondary)
-                        .lineLimit(1)
                 }
 
                 Panel(padding: 10, spacing: 5) {
@@ -447,32 +515,55 @@ public struct ControlsPage: View {
                             .lineLimit(1)
                             .fixedSize(horizontal: true, vertical: false)
                         Spacer(minLength: 0)
-                        Menu {
-                            ForEach(FanMode.allCases, id: \.self) { mode in
-                                Button {
-                                    guard mode != settings?.fan else { return }
-                                    onSaveFan(mode)
-                                } label: {
-                                    if mode == settings?.fan {
-                                        Label(mode.title, systemImage: "checkmark")
-                                    } else {
-                                        Text(mode.title)
+                        Button {
+                            guard isLive, settings != nil, !busy else { return }
+                            fanMenuOpen.toggle()
+                        } label: {
+                            HStack(spacing: 5) {
+                                Text(fanTitle)
+                                    .font(.system(size: 11, weight: .medium))
+                                    .lineLimit(1)
+                                Image(systemName: "chevron.down")
+                                    .font(.system(size: 8, weight: .semibold))
+                                    .foregroundStyle(Theme.inkSecondary)
+                            }
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .fixedSize()
+                        .disabled(!isLive || busy || settings == nil)
+                        .popover(isPresented: $fanMenuOpen, arrowEdge: .bottom) {
+                            VStack(spacing: 2) {
+                                ForEach(FanMode.allCases, id: \.self) { mode in
+                                    Button {
+                                        fanMenuOpen = false
+                                        guard isLive, settings != nil, !busy,
+                                              mode != settings?.fan else { return }
+                                        onSaveFan(mode)
+                                    } label: {
+                                        HStack(spacing: 6) {
+                                            Text(mode.title).font(.system(size: 11))
+                                            Spacer(minLength: 0)
+                                            if mode == settings?.fan {
+                                                Image(systemName: "checkmark")
+                                                    .font(.system(size: 9, weight: .bold))
+                                                    .foregroundStyle(Color.accentColor)
+                                                    .accessibilityHidden(true)
+                                            }
+                                        }
+                                        .padding(.horizontal, 8)
+                                        .frame(width: 116, height: 24)
+                                        .contentShape(Rectangle())
                                     }
+                                    .buttonStyle(.plain)
+                                    .disabled(!isLive || settings == nil || busy)
+                                    .accessibilityValue(mode == settings?.fan ? "已选择" : "")
                                 }
                             }
-                        } label: {
-                            Text(fanTitle)
-                                .font(.system(size: 11, weight: .medium))
+                            .padding(6)
                         }
-                        .menuStyle(.borderlessButton)
-                        .fixedSize()
-                        .disabled(busy || settings == nil)
                         .accessibilityLabel("风扇模式：\(fanTitle)")
                     }
-                    Text(settings == nil ? "读取中…" : (settings?.fan?.detail ?? "设备返回了未知模式"))
-                        .font(.system(size: 9.5, weight: .medium))
-                        .foregroundStyle(Theme.inkSecondary)
-                        .lineLimit(1)
                 }
             }
 

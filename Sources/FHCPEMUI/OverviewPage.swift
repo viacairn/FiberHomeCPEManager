@@ -1,8 +1,8 @@
 import SwiftUI
 import FHCPECore
 
-/// Overview page: network row, four-metric grid, nine-field cellular summary, disclosure
-/// row. No top model/IP header, no dividers, no refresh affordance (per v6 spec).
+/// Overview page: network card, compact traffic metrics and a four-column cellular
+/// summary. Content scrolls within the shared page canvas.
 public struct OverviewPage: View {
     public let data: PageData
     public let onMoreInfo: () -> Void
@@ -99,10 +99,12 @@ public struct OverviewPage: View {
     }
 
     private var heroTitle: String {
-        if data.isLive && !data.hasCellularSignal && data.ethernetConnected {
+        guard data.isLive else { return "—" }
+        if !data.hasCellularSignal && data.ethernetConnected {
             return "以太网宽带"
         }
-        return CarrierMapper.displayName(for: data.radio.plmn ?? data.snapshot?.plmn)
+        guard let carrierPLMN else { return "—" }
+        return CarrierMapper.displayName(for: carrierPLMN)
     }
 
     private var carrierPLMN: String? {
@@ -164,7 +166,8 @@ public struct OverviewPage: View {
 
     /// Both uplinks are stated: each WAN reports its own `ConnectionStatus`.
     private var heroStatus: (text: String, tone: StatusDot.Tone, tint: Color) {
-        switch (data.cellularConnected, data.ethernetConnected) {
+        guard data.isLive else { return ("设备未连接", .neutral, Theme.inkMuted) }
+        return switch (data.cellularConnected, data.ethernetConnected) {
         case (true, true): ("已注册 · 双网在线", .positive, Theme.positive)
         case (true, false): ("已注册 · 蜂窝在线", .positive, Theme.positive)
         case (false, true): ("以太网在线", .positive, Theme.positive)
@@ -196,19 +199,24 @@ public struct OverviewPage: View {
     // MARK: Metric grid
 
     private var metricGrid: some View {
-        Panel(padding: 9, spacing: 6) {
-            Grid(horizontalSpacing: 8, verticalSpacing: 6) {
+        let valueFont = Font.system(size: 22, weight: .bold).monospacedDigit()
+        return Panel(padding: 8, spacing: 4) {
+            Grid(horizontalSpacing: 8, verticalSpacing: 4) {
                 GridRow {
                     MetricCell(value: rate(data.snapshot?.uploadBps), unit: rateUnit(data.snapshot?.uploadBps),
-                               caption: "上行速率", accessibilityValue: rateAccessibility(data.snapshot?.uploadBps))
+                               caption: "上行速率", valueFont: valueFont,
+                               accessibilityValue: rateAccessibility(data.snapshot?.uploadBps))
                     MetricCell(value: traffic(data.snapshot?.todayBytes), unit: trafficUnit(data.snapshot?.todayBytes),
-                               caption: "今日流量", accessibilityValue: trafficAccessibility(data.snapshot?.todayBytes))
+                               caption: "今日流量", valueFont: valueFont,
+                               accessibilityValue: trafficAccessibility(data.snapshot?.todayBytes))
                 }
                 GridRow {
                     MetricCell(value: rate(data.snapshot?.downloadBps), unit: rateUnit(data.snapshot?.downloadBps),
-                               caption: "下行速率", accessibilityValue: rateAccessibility(data.snapshot?.downloadBps))
+                               caption: "下行速率", valueFont: valueFont,
+                               accessibilityValue: rateAccessibility(data.snapshot?.downloadBps))
                     MetricCell(value: traffic(data.snapshot?.monthBytes), unit: trafficUnit(data.snapshot?.monthBytes),
-                               caption: "本月流量", accessibilityValue: trafficAccessibility(data.snapshot?.monthBytes))
+                               caption: "本月流量", valueFont: valueFont,
+                               accessibilityValue: trafficAccessibility(data.snapshot?.monthBytes))
                 }
             }
             .frame(maxWidth: .infinity)
@@ -236,14 +244,33 @@ public struct OverviewPage: View {
                             quality: (level: Int, tint: Color)) -> some View {
         VStack(spacing: 2) {
             Text(label)
-                .font(Theme.label)
+                .font(.system(size: 9.5, weight: .semibold))
                 .foregroundStyle(Theme.inkSecondary)
             Text(value ?? "—")
-                .font(.system(size: 12.5, weight: .bold).monospacedDigit())
+                .font(.system(size: 11.5, weight: .bold).monospacedDigit())
                 .foregroundStyle(value == nil ? Theme.inkMuted : Color.primary)
                 .lineLimit(1)
                 .minimumScaleFactor(0.75)
             LevelMeter(level: quality.level, tint: quality.tint)
+        }
+        .frame(maxWidth: .infinity)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(label) \(value ?? "未知")")
+    }
+
+    /// Local sizing keeps the four-column summary readable without changing shared cells.
+    private func cellularStat(_ label: String, value: String?) -> some View {
+        VStack(spacing: 3) {
+            Text(label)
+                .font(.system(size: 9.5, weight: .semibold))
+                .foregroundStyle(Theme.inkSecondary)
+                .lineLimit(1)
+            Text(value ?? "—")
+                .font(.system(size: 11.5, weight: .bold).monospacedDigit())
+                .foregroundStyle(value == nil ? Theme.inkMuted : Color.primary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.75)
+                .textSelection(.enabled)
         }
         .frame(maxWidth: .infinity)
         .accessibilityElement(children: .combine)
@@ -256,8 +283,9 @@ public struct OverviewPage: View {
         VStack(spacing: 5) {
             HStack(spacing: 6) {
                 PanelHeading("蜂窝信息")
-                let aggregated = (data.snapshot?.carrierCount ?? 1) > 1
-                Text(data.snapshot?.carrierAggregationLabel ?? "单载波 PCC")
+                let carrierCount = data.snapshot?.carrierCount
+                let aggregated = (carrierCount ?? 0) > 1
+                Text(carrierCount == nil ? "—" : (data.snapshot?.carrierAggregationLabel ?? "—"))
                     .font(.system(size: 9.5, weight: .bold))
                     .foregroundStyle(aggregated ? AnyShapeStyle(Color.accentColor)
                                                 : AnyShapeStyle(Theme.inkSecondary))
@@ -281,29 +309,28 @@ public struct OverviewPage: View {
                     .contentShape(CapsulePanelShape(maxRadius: 999))
                 }
                 .buttonStyle(.plain)
-                .help("蜂窝详情、邻区与小区锁定")
-                .accessibilityLabel("打开蜂窝详情")
+                .help("基站与小区、载波聚合与锁定配置")
+                .accessibilityLabel("打开基站与小区")
             }
-            Panel(padding: 9, spacing: 5) {
-                Grid(horizontalSpacing: 6, verticalSpacing: 5) {
-                    GridRow {
-                        signalCell("RSRP", value: FieldFormat.dbm(data.radio.rsrp),
-                                   quality: SignalQuality.rsrp(MetricFormatter.number(data.radio.rsrp)))
-                        signalCell("RSRQ", value: FieldFormat.db(data.radio.rsrq),
-                                   quality: SignalQuality.rsrq(MetricFormatter.number(data.radio.rsrq)))
-                        signalCell("SINR", value: FieldFormat.db(data.radio.sinr),
-                                   quality: SignalQuality.sinr(MetricFormatter.number(data.radio.sinr)))
-                    }
-                    GridRow {
-                        StatCell(label: "PCI", value: data.radio.pci)
-                        StatCell(label: "NR-ARFCN", value: data.isNR ? data.radio.arfcn : data.radio.arfcn)
-                        StatCell(label: "TAC", value: data.radio.tac)
-                    }
-                    GridRow {
-                        StatCell(label: "上行签约速率", value: ulAmbrText)
-                        StatCell(label: "下行签约速率", value: dlAmbrText)
-                        StatCell(label: "QCI", value: data.radio.qci)
-                    }
+            Panel(padding: 8, spacing: 6) {
+                LazyVGrid(columns: Array(repeating: GridItem(.flexible(minimum: 0), spacing: 6), count: 4), spacing: 7) {
+                    signalCell("RSRP", value: FieldFormat.dbm(data.radio.rsrp),
+                               quality: SignalQuality.rsrp(MetricFormatter.number(data.radio.rsrp)))
+                    signalCell("RSRQ", value: FieldFormat.db(data.radio.rsrq),
+                               quality: SignalQuality.rsrq(MetricFormatter.number(data.radio.rsrq)))
+                    signalCell("SINR", value: FieldFormat.db(data.radio.sinr),
+                               quality: SignalQuality.sinr(MetricFormatter.number(data.radio.sinr)))
+                    cellularStat("RSSI", value: FieldFormat.dbm(data.radio.rssi))
+
+                    cellularStat("PCI", value: data.radio.pci)
+                    cellularStat(data.isNR ? "NR-ARFCN" : "EARFCN", value: data.radio.arfcn)
+                    cellularStat("TAC", value: data.radio.tac)
+                    cellularStat(data.isNR ? "NCI" : "Cell ID", value: data.radio.cell.map(FieldFormat.hex))
+
+                    cellularStat("QCI 承载等级", value: data.radio.qci)
+                    cellularStat("上行签约速率", value: ulAmbrText)
+                    cellularStat("下行签约速率", value: dlAmbrText)
+                    cellularStat("CQI", value: data.radio.cqi)
                 }
             }
         }
@@ -312,15 +339,15 @@ public struct OverviewPage: View {
     // MARK: Formatting
 
     private func rate(_ bits: Double?) -> String? {
-        guard data.isLive else { return "0" }
-        return MetricFormatter.bitRate(bits)?.value ?? "0"
+        guard data.isLive else { return nil }
+        return MetricFormatter.bitRate(bits)?.value
     }
     private func rateUnit(_ bits: Double?) -> String? {
-        guard data.isLive else { return "Kbps" }
-        return MetricFormatter.bitRate(bits)?.unit ?? "Kbps"
+        guard data.isLive else { return nil }
+        return MetricFormatter.bitRate(bits)?.unit
     }
     private func rateAccessibility(_ bits: Double?) -> String {
-        guard data.isLive, let value = MetricFormatter.bitRate(bits) else { return "0 Kbps" }
+        guard data.isLive, let value = MetricFormatter.bitRate(bits) else { return "无数据" }
         return "\(value.value) \(value.unit)"
     }
 
@@ -345,7 +372,7 @@ public struct OverviewPage: View {
         return MetricFormatter.bytes(bytes)?.value
     }
     private func trafficUnit(_ bytes: Double?) -> String? {
-        guard data.isLive else { return "GB" }
+        guard data.isLive else { return nil }
         return MetricFormatter.bytes(bytes)?.unit
     }
     private func trafficAccessibility(_ bytes: Double?) -> String {
@@ -360,16 +387,25 @@ public struct OverviewPage: View {
 /// of optional-chaining noise. `snapshot == nil` means "no live evidence": every value
 /// renders as "—" rather than a fabricated zero.
 public struct PageData: Sendable, Equatable {
-    public var snapshot: DeviceSnapshot?
-    public var devices: [ConnectedDevice]
+    private var rawSnapshot: DeviceSnapshot?
+    /// A retained or late reading is never presented without a live session.
+    public var snapshot: DeviceSnapshot? {
+        get { isLive ? rawSnapshot : nil }
+        set { rawSnapshot = newValue }
+    }
+    private var rawDevices: [ConnectedDevice]
+    public var devices: [ConnectedDevice] {
+        get { isLive ? rawDevices : [] }
+        set { rawDevices = newValue }
+    }
     public var stale: Bool
     public var connected: Bool
 
     public init(snapshot: DeviceSnapshot?, devices: [ConnectedDevice] = [], stale: Bool = false, connected: Bool = false) {
-        self.snapshot = snapshot; self.devices = devices; self.stale = stale; self.connected = connected
+        self.rawSnapshot = snapshot; self.rawDevices = devices; self.stale = stale; self.connected = connected
     }
 
-    public var isLive: Bool { connected && !stale && snapshot != nil }
+    public var isLive: Bool { connected && !stale && rawSnapshot != nil }
     public var model: String {
         guard let snapshot, !snapshot.model.isEmpty else { return "待连接" }
         return snapshot.model

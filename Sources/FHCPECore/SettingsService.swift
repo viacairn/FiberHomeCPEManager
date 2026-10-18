@@ -295,8 +295,13 @@ public struct SettingsService: Sendable {
 
     /// Sets `FanAutoConfig.mode` and confirms it by reading the node back.
     public func setFanMode(_ mode: FanMode) async throws -> Bool {
-        guard try await write(Self.fanNode, mode.rawValue) else { return false }
+        let acknowledgement = try await rpc.call("set_value_by_xmlnode", data: .object([
+            "url": .strings(["mode": Self.fanNode]),
+            "value": .strings(["mode": mode.rawValue])
+        ]), publicAccess: false)
+        try FirmwareNodes(rpc: rpc).ensureWrite(acknowledgement)
         let reply = try await readBatch(["mode": Self.fanNode])
-        return reply["mode"].text == mode.rawValue
+        guard reply["mode"].text == mode.rawValue else { throw CPEError.uncertain }
+        return true
     }
 }

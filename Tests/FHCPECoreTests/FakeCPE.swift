@@ -76,6 +76,10 @@ final class FakeCPE: @unchecked Sendable {
 
     func stop() { listener.cancel() }
 
+    /// Mirrors the RP0112 heartbeat's expired-session status after another entry logs in.
+    private var sessionExpired = false
+    func expireSession() { queue.sync { sessionExpired = true } }
+
     // MARK: HTTP
 
     private func handle(_ connection: NWConnection) {
@@ -158,6 +162,7 @@ final class FakeCPE: @unchecked Sendable {
         if request.path.hasPrefix("/fh_api/tmp/FHAPIS") || request.path.hasPrefix("/fh_api/tmp/FHNCAPIS") {
             // Mirror the firmware: public endpoints answer before login, protected ones do not.
             let isPublicPath = request.path.hasPrefix("/fh_api/tmp/FHNCAPIS")
+            if !isPublicPath && sessionExpired { return http(418, Data("0\n".utf8)) }
             guard isPublicPath || loginAccepted else {
                 trace("PROTECTED_PREAUTH \(request.path)")
                 return http(403, Data())
