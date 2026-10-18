@@ -22,7 +22,7 @@ FiberHome LG6851F 5G CPE 的原生 macOS 菜单栏控制台与桌面磁贴。Swi
 ./script/build_and_run.sh            # 构建、打包、ad-hoc 签名并启动
 ./script/build_and_run.sh --build-only
 ./script/test.sh                     # 143 项单元 / 端到端测试
-./script/ui_matrix.sh                # 52 项 UI 交互检查（可带 CPE_PASS 验证登录后页面）
+./script/ui_matrix.sh                # 56 项 UI 交互检查（可带 CPE_PASS 验证登录后页面）
 ```
 
 产物为 `build/FiberHomeCPEManager.app`，内含 `Contents/PlugIns/FiberHomeCPEManagerWidget.appex`（桌面磁贴）。使用本地 ad-hoc 签名，不含公证。

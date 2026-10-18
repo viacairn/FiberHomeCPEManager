@@ -1112,6 +1112,12 @@ case "controls":
     check("上行模式矩阵可见", initial.contains { $0.contains("蜂窝上行") })
     check("主 SSID 常驻", initial.contains { $0.contains("FHCPE-Xe3P-SmartHome") })
     check("备用 SSID 默认折叠", !initial.contains { $0.contains("FHCPE-Xe3P-2") })
+    let menuButtons = descendants(root).filter { attribute($0, kAXRoleAttribute) == "AXMenuButton" }
+    check("风扇入口存在", initial.contains { $0.contains("风扇") } && !menuButtons.isEmpty)
+    check("指示灯与风扇无副描述",
+          !initial.contains { $0.contains("平衡散热与静音") || $0.contains("开启 · 关闭后熄灭") })
+    check("MLO 预留入口", initial.contains { $0.contains("MLO 多链路聚合") })
+    check("定时重启时间单行", initial.contains { $0.contains("定时重启，") && $0.contains("·") })
 
     // Expand the backup channels.
     if let toggle = descendants(root).first(where: {
