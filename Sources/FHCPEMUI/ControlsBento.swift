@@ -20,6 +20,14 @@ public struct ControlsPage: View {
     public let onSaveFan: (FanMode) -> Void
     public let switchingTo: UplinkTarget?
     public let onSwitchUplink: (UplinkTarget) -> Void
+    public let mobile: MobileNetworkState?
+    public let onSetAirplaneMode: (Bool) -> Void
+    public let onSetCellularData: (Bool) -> Void
+    public let onSaveAntenna: (Bool, AntennaType) -> Void
+    public let ddnsCount: Int?
+    public let portMappingCount: Int?
+    public let onOpenDDNS: () -> Void
+    public let onOpenPortMapping: () -> Void
 
     public init(settings: DeviceSettings?, busy: Bool, status: String?,
                 statusIsError: Bool = false,
@@ -29,12 +37,25 @@ public struct ControlsPage: View {
                 onSaveLED: @escaping (Bool) -> Void,
                 onSaveFan: @escaping (FanMode) -> Void = { _ in },
                 switchingTo: UplinkTarget? = nil,
-                onSwitchUplink: @escaping (UplinkTarget) -> Void = { _ in }) {
+                onSwitchUplink: @escaping (UplinkTarget) -> Void = { _ in },
+                mobile: MobileNetworkState? = nil,
+                onSetAirplaneMode: @escaping (Bool) -> Void = { _ in },
+                onSetCellularData: @escaping (Bool) -> Void = { _ in },
+                onSaveAntenna: @escaping (Bool, AntennaType) -> Void = { _, _ in },
+                ddnsCount: Int? = nil, portMappingCount: Int? = nil,
+                onOpenDDNS: @escaping () -> Void = {},
+                onOpenPortMapping: @escaping () -> Void = {}) {
         self.settings = settings; self.busy = busy; self.status = status
         self.statusIsError = statusIsError
         self.onToggleSSID = onToggleSSID; self.onRenameSSID = onRenameSSID
         self.onSaveReboot = onSaveReboot; self.onSaveLED = onSaveLED; self.onSaveFan = onSaveFan
         self.switchingTo = switchingTo; self.onSwitchUplink = onSwitchUplink
+        self.mobile = mobile
+        self.onSetAirplaneMode = onSetAirplaneMode
+        self.onSetCellularData = onSetCellularData
+        self.onSaveAntenna = onSaveAntenna
+        self.ddnsCount = ddnsCount; self.portMappingCount = portMappingCount
+        self.onOpenDDNS = onOpenDDNS; self.onOpenPortMapping = onOpenPortMapping
     }
 
     @State private var showBackupWiFi = false
@@ -42,6 +63,7 @@ public struct ControlsPage: View {
     @State private var draftTime = "04:30"
     @State private var draftWeekday = "Everyday"
     @State private var pendingUplink: UplinkTarget?
+    @State private var fanMenuOpen = false
 
     public var body: some View {
         VStack(spacing: 0) {
@@ -51,6 +73,8 @@ public struct ControlsPage: View {
                     wifiSection
                     rebootSection
                     hardwareSection
+                    mobileSection
+                    networkServicesSection
                 }
                 .padding(.horizontal, Theme.contentPadding)
                 .padding(.top, 0)
@@ -452,20 +476,8 @@ public struct ControlsPage: View {
                             .lineLimit(1)
                             .fixedSize(horizontal: true, vertical: false)
                         Spacer(minLength: 0)
-                        Menu {
-                            Picker("风扇模式", selection: Binding<FanMode?>(
-                                get: { settings?.fan },
-                                set: { mode in
-                                    guard let mode, mode != settings?.fan else { return }
-                                    onSaveFan(mode)
-                                }
-                            )) {
-                                ForEach(FanMode.allCases, id: \.self) { mode in
-                                    Text(mode.title).tag(Optional(mode))
-                                }
-                            }
-                            .pickerStyle(.inline)
-                            .labelsHidden()
+                        Button {
+                            fanMenuOpen.toggle()
                         } label: {
                             HStack(spacing: 5) {
                                 Text(fanTitle)
@@ -475,11 +487,37 @@ public struct ControlsPage: View {
                                     .font(.system(size: 8, weight: .semibold))
                                     .foregroundStyle(Theme.inkSecondary)
                             }
+                            .contentShape(Rectangle())
                         }
-                        .menuStyle(.borderlessButton)
-                        .menuIndicator(.hidden)
+                        .buttonStyle(.plain)
                         .fixedSize()
                         .disabled(busy || settings == nil)
+                        .popover(isPresented: $fanMenuOpen, arrowEdge: .bottom) {
+                            VStack(spacing: 2) {
+                                ForEach(FanMode.allCases, id: \.self) { mode in
+                                    Button {
+                                        fanMenuOpen = false
+                                        guard mode != settings?.fan else { return }
+                                        onSaveFan(mode)
+                                    } label: {
+                                        HStack(spacing: 6) {
+                                            Text(mode.title).font(.system(size: 11))
+                                            Spacer(minLength: 0)
+                                            if mode == settings?.fan {
+                                                Image(systemName: "checkmark")
+                                                    .font(.system(size: 9, weight: .bold))
+                                                    .foregroundStyle(Color.accentColor)
+                                            }
+                                        }
+                                        .padding(.horizontal, 8)
+                                        .frame(width: 116, height: 24)
+                                        .contentShape(Rectangle())
+                                    }
+                                    .buttonStyle(.plain)
+                                }
+                            }
+                            .padding(6)
+                        }
                         .accessibilityLabel("风扇模式：\(fanTitle)")
                     }
                 }
@@ -497,6 +535,115 @@ public struct ControlsPage: View {
             }
             .opacity(settings?.supportsMLO == true ? 1 : 0.78)
         }
+    }
+
+    // MARK: - Mobile network
+
+    private var mobileSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            PanelHeading("移动网络")
+            Panel(padding: 10, spacing: 7) {
+                mobileRow("飞行模式", symbol: "airplane",
+                          isOn: Binding(get: { mobile?.airplaneMode ?? false },
+                                        set: { onSetAirplaneMode($0) }),
+                          enabled: mobile != nil && !busy)
+                Rectangle().fill(Theme.hairline).frame(height: 0.5)
+                mobileRow("蜂窝数据", symbol: "antenna.radiowaves.left.and.right",
+                          isOn: Binding(get: { mobile?.cellularDataEnabled ?? false },
+                                        set: { onSetCellularData($0) }),
+                          enabled: mobile != nil && !busy)
+                Rectangle().fill(Theme.hairline).frame(height: 0.5)
+                HStack(spacing: 6) {
+                    Image(systemName: "dot.radiowaves.left.and.right")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(Theme.inkSecondary)
+                    Text("外置天线")
+                        .font(.system(size: 11.5, weight: .semibold))
+                    Spacer(minLength: 0)
+                    if mobile?.antennaEnabled == true {
+                        Picker("天线类型", selection: Binding(
+                            get: { mobile?.antennaType ?? .automatic },
+                            set: { onSaveAntenna(true, $0) }
+                        )) {
+                            ForEach(AntennaType.allCases, id: \.self) { type in
+                                Text(type.title).tag(type)
+                            }
+                        }
+                        .pickerStyle(.menu)
+                        .labelsHidden()
+                        .controlSize(.small)
+                        .fixedSize()
+                        .disabled(mobile == nil || busy)
+                    }
+                    Toggle("外置天线", isOn: Binding(
+                        get: { mobile?.antennaEnabled ?? false },
+                        set: { onSaveAntenna($0, mobile?.antennaType ?? .automatic) }
+                    ))
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+                    .controlSize(.mini)
+                    .disabled(mobile == nil || busy)
+                }
+            }
+        }
+    }
+
+    private func mobileRow(_ title: String, symbol: String,
+                           isOn: Binding<Bool>, enabled: Bool) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: symbol)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(Theme.inkSecondary)
+            Text(title)
+                .font(.system(size: 11.5, weight: .semibold))
+            Spacer(minLength: 0)
+            Toggle(title, isOn: isOn)
+                .labelsHidden()
+                .toggleStyle(.switch)
+                .controlSize(.mini)
+                .disabled(!enabled)
+        }
+    }
+
+    // MARK: - Network services
+
+    private var networkServicesSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            PanelHeading("网络服务")
+            Panel(padding: 4, spacing: 0) {
+                serviceRow("DDNS 设置", symbol: "globe", count: ddnsCount, action: onOpenDDNS)
+                Rectangle().fill(Theme.hairline).frame(height: 0.5).padding(.leading, 30)
+                serviceRow("端口映射", symbol: "arrow.left.arrow.right", count: portMappingCount,
+                           action: onOpenPortMapping)
+            }
+        }
+    }
+
+    private func serviceRow(_ title: String, symbol: String, count: Int?,
+                            action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 8) {
+                Image(systemName: symbol)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(Theme.inkSecondary)
+                    .frame(width: 18, height: 18)
+                Text(title)
+                    .font(.system(size: 11.5, weight: .semibold))
+                Spacer(minLength: 0)
+                Text(count.map { "\($0)" } ?? "—")
+                    .font(.system(size: 10, weight: .medium).monospacedDigit())
+                    .foregroundStyle(Theme.inkSecondary)
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 8.5, weight: .bold))
+                    .foregroundStyle(Theme.inkMuted)
+            }
+            .padding(.horizontal, 6)
+            .frame(height: 32)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(busy)
+        .accessibilityLabel("\(title)，\(count.map { "\($0) 条" } ?? "未读取")")
     }
 }
 

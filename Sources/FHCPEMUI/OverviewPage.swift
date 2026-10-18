@@ -199,19 +199,26 @@ public struct OverviewPage: View {
     // MARK: Metric grid
 
     private var metricGrid: some View {
-        Panel(padding: 9, spacing: 6) {
-            Grid(horizontalSpacing: 8, verticalSpacing: 6) {
+        let valueFont = Font.system(size: 22, weight: .bold).monospacedDigit()
+        let unitFont = Font.system(size: 9, weight: .semibold)
+        let captionFont = Font.system(size: 10, weight: .medium)
+        return Panel(padding: 8, spacing: 4) {
+            Grid(horizontalSpacing: 8, verticalSpacing: 4) {
                 GridRow {
                     MetricCell(value: rate(data.snapshot?.uploadBps), unit: rateUnit(data.snapshot?.uploadBps),
-                               caption: "上行速率", accessibilityValue: rateAccessibility(data.snapshot?.uploadBps))
+                               caption: "上行速率", valueFont: valueFont, unitFont: unitFont,
+                               captionFont: captionFont, accessibilityValue: rateAccessibility(data.snapshot?.uploadBps))
                     MetricCell(value: traffic(data.snapshot?.todayBytes), unit: trafficUnit(data.snapshot?.todayBytes),
-                               caption: "今日流量", accessibilityValue: trafficAccessibility(data.snapshot?.todayBytes))
+                               caption: "今日流量", valueFont: valueFont, unitFont: unitFont,
+                               captionFont: captionFont, accessibilityValue: trafficAccessibility(data.snapshot?.todayBytes))
                 }
                 GridRow {
                     MetricCell(value: rate(data.snapshot?.downloadBps), unit: rateUnit(data.snapshot?.downloadBps),
-                               caption: "下行速率", accessibilityValue: rateAccessibility(data.snapshot?.downloadBps))
+                               caption: "下行速率", valueFont: valueFont, unitFont: unitFont,
+                               captionFont: captionFont, accessibilityValue: rateAccessibility(data.snapshot?.downloadBps))
                     MetricCell(value: traffic(data.snapshot?.monthBytes), unit: trafficUnit(data.snapshot?.monthBytes),
-                               caption: "本月流量", accessibilityValue: trafficAccessibility(data.snapshot?.monthBytes))
+                               caption: "本月流量", valueFont: valueFont, unitFont: unitFont,
+                               captionFont: captionFont, accessibilityValue: trafficAccessibility(data.snapshot?.monthBytes))
                 }
             }
             .frame(maxWidth: .infinity)
@@ -239,10 +246,10 @@ public struct OverviewPage: View {
                             quality: (level: Int, tint: Color)) -> some View {
         VStack(spacing: 2) {
             Text(label)
-                .font(Theme.label)
+                .font(.system(size: 9.5, weight: .semibold))
                 .foregroundStyle(Theme.inkSecondary)
             Text(value ?? "—")
-                .font(.system(size: 12.5, weight: .bold).monospacedDigit())
+                .font(.system(size: 11.5, weight: .bold).monospacedDigit())
                 .foregroundStyle(value == nil ? Theme.inkMuted : Color.primary)
                 .lineLimit(1)
                 .minimumScaleFactor(0.75)
@@ -288,8 +295,10 @@ public struct OverviewPage: View {
                 .help("蜂窝详情、邻区与小区锁定")
                 .accessibilityLabel("打开蜂窝详情")
             }
-            Panel(padding: 9, spacing: 5) {
-                Grid(horizontalSpacing: 6, verticalSpacing: 5) {
+            Panel(padding: 7, spacing: 4) {
+                let small = Font.system(size: 11, weight: .bold).monospacedDigit()
+                let label = Font.system(size: 9.5, weight: .semibold)
+                Grid(horizontalSpacing: 4, verticalSpacing: 4) {
                     GridRow {
                         signalCell("RSRP", value: FieldFormat.dbm(data.radio.rsrp),
                                    quality: SignalQuality.rsrp(MetricFormatter.number(data.radio.rsrp)))
@@ -297,16 +306,21 @@ public struct OverviewPage: View {
                                    quality: SignalQuality.rsrq(MetricFormatter.number(data.radio.rsrq)))
                         signalCell("SINR", value: FieldFormat.db(data.radio.sinr),
                                    quality: SignalQuality.sinr(MetricFormatter.number(data.radio.sinr)))
+                        StatCell(label: "RSSI", value: FieldFormat.dbm(data.radio.rssi),
+                                 valueFont: small, labelFont: label)
                     }
                     GridRow {
-                        StatCell(label: "PCI", value: data.radio.pci)
-                        StatCell(label: "NR-ARFCN", value: data.isNR ? data.radio.arfcn : data.radio.arfcn)
-                        StatCell(label: "TAC", value: data.radio.tac)
+                        StatCell(label: "PCI", value: data.radio.pci, valueFont: small, labelFont: label)
+                        StatCell(label: "NR-ARFCN", value: data.radio.arfcn, valueFont: small, labelFont: label)
+                        StatCell(label: "TAC", value: data.radio.tac, valueFont: small, labelFont: label)
+                        StatCell(label: "NCI", value: data.radio.cell.map(FieldFormat.hex),
+                                 valueFont: small, labelFont: label)
                     }
                     GridRow {
-                        StatCell(label: "上行签约速率", value: ulAmbrText)
-                        StatCell(label: "下行签约速率", value: dlAmbrText)
-                        StatCell(label: "QCI", value: data.radio.qci)
+                        StatCell(label: "QCI 承载等级", value: data.radio.qci, valueFont: small, labelFont: label)
+                        StatCell(label: "上行签约速率", value: ulAmbrText, valueFont: small, labelFont: label)
+                        StatCell(label: "下行签约速率", value: dlAmbrText, valueFont: small, labelFont: label)
+                        StatCell(label: "CQI", value: data.radio.cqi, valueFont: small, labelFont: label)
                     }
                 }
             }

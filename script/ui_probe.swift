@@ -12,6 +12,7 @@ import ApplicationServices
 
 let bundleID = "local.fhcpem.app"
 
+
 func attribute(_ element: AXUIElement, _ key: String) -> String {
     var value: CFTypeRef?
     AXUIElementCopyAttributeValue(element, key as CFString, &value)
@@ -103,6 +104,17 @@ func popoverWindowFrame() -> CGRect? {
     return nil
 }
 
+func fanMenuWindowFrame() -> CGRect? {
+    let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] ?? []
+    for window in list where (window[kCGWindowOwnerName as String] as? String ?? "").contains("FiberHomeCPEManager") {
+        guard let bounds = window[kCGWindowBounds as String] as? [String: Double],
+              let width = bounds["Width"], let height = bounds["Height"],
+              width > 80, width < 220, height < 220 else { continue }
+        return CGRect(x: bounds["X"]!, y: bounds["Y"]!, width: width, height: height)
+    }
+    return nil
+}
+
 /// `NSPopover` content is an AXPopover under the status item, not an app window.
 func popoverRoot() -> AXUIElement? {
     guard let frame = popoverWindowFrame() else { return nil }
@@ -112,7 +124,14 @@ func popoverRoot() -> AXUIElement? {
     var node = element
     for _ in 0..<6 {
         guard let current = node else { return nil }
-        if attribute(current, kAXRoleAttribute) == "AXPopover" { return current }
+        let role = attribute(current, kAXRoleAttribute)
+        if role == "AXPopover" { return current }
+        if role == "AXWindow" {
+            let size = sizeOf(current)
+            if abs(size.width - frame.width) < 2, abs(size.height - frame.height) < 2 {
+                return current
+            }
+        }
         var parent: CFTypeRef?
         AXUIElementCopyAttributeValue(current, kAXParentAttribute as CFString, &parent)
         node = parent.flatMap {
@@ -152,17 +171,24 @@ func waitFor(_ timeout: TimeInterval = 2.5, _ condition: () -> Bool) -> Bool {
 }
 
 func openPopover() {
+    // Bring the app forward first: an already-open panel that sits behind another window
+    // is not reachable through element-at-position until it is frontmost.
+    app()?.activate(options: [.activateAllWindows])
+    _ = waitFor(1.0, { app()?.isActive == true })
+    if popoverRoot() != nil { return }
     guard let item = statusItemElement() else { print("FAIL: no status item"); return }
-    if popoverRoot() != nil {
-        activateApp()
-        return
+    // A panel window exists but AX cannot see it: toggle it closed, then reopen once.
+    if popoverWindowFrame() != nil, popoverRoot() == nil {
+        _ = AXUIElementPerformAction(item, kAXPressAction as CFString)
+        _ = waitFor(1.0, { popoverRoot() != nil })
+        if popoverRoot() != nil { return }
     }
     _ = AXUIElementPerformAction(item, kAXPressAction as CFString)
     if !waitFor(1.5, { popoverRoot() != nil }) {
         click(item)
         _ = waitFor(1.5, { popoverRoot() != nil })
     }
-    app()?.activate(options: [.activateIgnoringOtherApps])
+    app()?.activate(options: [.activateAllWindows])
     _ = waitFor(1.0, { app()?.isActive == true })
 }
 
@@ -270,7 +296,7 @@ func waitUntilQuit(pid: pid_t, timeout: TimeInterval = 6) -> Bool {
 }
 
 func activateApp() {
-    app()?.activate(options: [.activateIgnoringOtherApps])
+    app()?.activate(options: [.activateAllWindows])
     _ = waitFor(1.0, { app()?.isActive == true })
 }
 
@@ -953,6 +979,51 @@ case "controls-dump":
         print("  \(role) \(Int(size.width))x\(Int(size.height)) desc=\(desc) value=\(value) enabled=\(String(describing: boolAttribute(element, kAXEnabledAttribute)))")
     }
 
+case "fan-mode":
+    resetUI()
+    openPopover()
+    activateApp()
+    pressKey(20, flags: .maskCommand)
+    usleep(800_000)
+    func fanButton() -> AXUIElement? {
+        guard let root = popoverRoot() else { return nil }
+        return descendants(root).first {
+            attribute($0, kAXRoleAttribute) == "AXButton" &&
+            attribute($0, kAXDescriptionAttribute).contains("风扇模式：")
+        }
+    }
+    func fanTexts() -> [String] {
+        guard let root = popoverRoot() else { return [] }
+        return descendants(root).flatMap {
+            [attribute($0, kAXDescriptionAttribute), attribute($0, kAXValueAttribute)]
+        }
+    }
+    guard let fan = fanButton() else { print("  FAIL 风扇按钮缺失"); break }
+    check("风扇入口存在", true)
+    click(fan)
+    usleep(700_000)
+    guard let menu = fanMenuWindowFrame() else { print("  FAIL 风扇菜单未打开"); break }
+    check("风扇菜单可展开", true, "\(Int(menu.width))x\(Int(menu.height))")
+    click(at: CGPoint(x: menu.midX, y: menu.minY + menu.height * 0.5))   // 第二行：静音
+    usleep(1_800_000)
+    let silent = fanTexts()
+    check("切换为静音模式", silent.contains { $0.contains("风扇模式：静音模式") }
+          || silent.contains { $0.contains("风扇已切换为静音模式") },
+          silent.first { $0.contains("风扇") } ?? "no text")
+    // Restore the standard mode so the device is left as found.
+    if let fan = fanButton() {
+        click(fan)
+        usleep(700_000)
+        if let menu = fanMenuWindowFrame() {
+            click(at: CGPoint(x: menu.midX, y: menu.minY + menu.height * 0.2))  // 第一行：标准
+            usleep(1_800_000)
+        }
+    }
+    let restored = fanTexts()
+    check("恢复标准模式", restored.contains { $0.contains("风扇模式：标准模式") }
+          || restored.contains { $0.contains("风扇已切换为标准模式") },
+          restored.first { $0.contains("风扇") } ?? "no text")
+
 case "compose-dump":
     openPopover()
     activateApp()
@@ -1112,8 +1183,7 @@ case "controls":
     check("上行模式矩阵可见", initial.contains { $0.contains("蜂窝上行") })
     check("主 SSID 常驻", initial.contains { $0.contains("FHCPE-Xe3P-SmartHome") })
     check("备用 SSID 默认折叠", !initial.contains { $0.contains("FHCPE-Xe3P-2") })
-    let menuButtons = descendants(root).filter { attribute($0, kAXRoleAttribute) == "AXMenuButton" }
-    check("风扇入口存在", initial.contains { $0.contains("风扇") } && !menuButtons.isEmpty)
+    check("风扇入口存在", initial.contains { $0.contains("风扇模式：") })
     check("指示灯与风扇无副描述",
           !initial.contains { $0.contains("平衡散热与静音") || $0.contains("开启 · 关闭后熄灭") })
     check("MLO 预留入口", initial.contains { $0.contains("MLO 多链路聚合") })
@@ -1142,6 +1212,88 @@ case "controls":
     }
     check("重启卡片展开出时间与周期",
           !expandedBefore && texts().contains { $0.contains("重启时间") })
+
+case "mobile":
+    resetUI()
+    openPopover()
+    activateApp()
+    pressKey(20, flags: .maskCommand)
+    usleep(900_000)
+    guard let root = popoverRoot() else { print("  FAIL no popover"); break }
+    let values = descendants(root).flatMap {
+        [attribute($0, kAXDescriptionAttribute), attribute($0, kAXValueAttribute)]
+    }
+    check("移动网络区可见", values.contains("移动网络"))
+    check("飞行模式入口", values.contains("飞行模式"))
+    check("蜂窝数据入口", values.contains("蜂窝数据"))
+    check("外置天线入口", values.contains("外置天线"))
+    check("天线类型入口", values.contains("天线类型"))
+    check("网络服务入口", values.contains { $0.contains("DDNS 设置") } && values.contains { $0.contains("端口映射") })
+
+case "advanced":
+    resetUI()
+    openPopover()
+    activateApp()
+    pressKey(20, flags: .maskCommand)
+    usleep(900_000)
+    guard let root = popoverRoot() else { print("  FAIL no popover"); break }
+    guard let ddns = descendants(root).first(where: {
+        attribute($0, kAXRoleAttribute) == "AXButton" &&
+        attribute($0, kAXDescriptionAttribute).contains("DDNS 设置")
+    }) else { print("  FAIL DDNS row missing"); break }
+    _ = AXUIElementPerformAction(ddns, kAXPressAction as CFString)
+    usleep(1_000_000)
+    var page = descendants(popoverRoot() ?? root).flatMap {
+        [attribute($0, kAXDescriptionAttribute), attribute($0, kAXValueAttribute)]
+    }
+    check("DDNS 页面打开", page.contains("DDNS 设置"))
+    check("DDNS 添加按钮", page.contains("添加 DDNS"))
+    if let add = descendants(popoverRoot() ?? root).first(where: {
+        attribute($0, kAXRoleAttribute) == "AXButton" &&
+        attribute($0, kAXDescriptionAttribute).contains("添加 DDNS")
+    }) {
+        _ = AXUIElementPerformAction(add, kAXPressAction as CFString)
+        usleep(900_000)
+        page = descendants(popoverRoot() ?? root).flatMap {
+            [attribute($0, kAXDescriptionAttribute), attribute($0, kAXValueAttribute)]
+        }
+        check("DDNS 表单字段", page.contains("域名 / 主机名") && page.contains("用户名"))
+        if let cancel = descendants(popoverRoot() ?? root).first(where: {
+            attribute($0, kAXRoleAttribute) == "AXButton" &&
+            attribute($0, kAXDescriptionAttribute).contains("取消")
+        }) { _ = AXUIElementPerformAction(cancel, kAXPressAction as CFString); usleep(600_000) }
+    }
+    if let back = descendants(popoverRoot() ?? root).first(where: {
+        attribute($0, kAXRoleAttribute) == "AXButton" &&
+        attribute($0, kAXDescriptionAttribute).contains("返回上一级")
+    }) { _ = AXUIElementPerformAction(back, kAXPressAction as CFString); usleep(700_000) }
+    guard let controls = popoverRoot() else { print("  FAIL controls missing"); break }
+    guard let ports = descendants(controls).first(where: {
+        attribute($0, kAXRoleAttribute) == "AXButton" &&
+        attribute($0, kAXDescriptionAttribute).contains("端口映射")
+    }) else { print("  FAIL port row missing"); break }
+    _ = AXUIElementPerformAction(ports, kAXPressAction as CFString)
+    usleep(1_000_000)
+    page = descendants(popoverRoot() ?? controls).flatMap {
+        [attribute($0, kAXDescriptionAttribute), attribute($0, kAXValueAttribute)]
+    }
+    check("端口映射页面打开", page.contains("端口映射"))
+    check("端口映射添加按钮", page.contains("添加端口映射"))
+    if let add = descendants(popoverRoot() ?? controls).first(where: {
+        attribute($0, kAXRoleAttribute) == "AXButton" &&
+        attribute($0, kAXDescriptionAttribute).contains("添加端口映射")
+    }) {
+        _ = AXUIElementPerformAction(add, kAXPressAction as CFString)
+        usleep(900_000)
+        page = descendants(popoverRoot() ?? controls).flatMap {
+            [attribute($0, kAXDescriptionAttribute), attribute($0, kAXValueAttribute)]
+        }
+        check("端口映射表单字段", page.contains("内网 IP") && page.contains("内部端口"))
+        if let cancel = descendants(popoverRoot() ?? controls).first(where: {
+            attribute($0, kAXRoleAttribute) == "AXButton" &&
+            attribute($0, kAXDescriptionAttribute).contains("取消")
+        }) { _ = AXUIElementPerformAction(cancel, kAXPressAction as CFString); usleep(600_000) }
+    }
 
 case "keys":
     resetUI()

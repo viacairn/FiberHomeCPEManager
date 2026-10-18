@@ -278,6 +278,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             model.closeCellular()
             return true
         }
+        if model.route == .ddns {
+            model.closeDDNS()
+            return true
+        }
+        if model.route == .portMapping {
+            model.closePortMapping()
+            return true
+        }
         if model.tab == 3, model.smsRoute != .threads {
             model.smsRoute = .threads
             model.selectedThreadID = nil
@@ -292,7 +300,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         model.tab = index
         model.smsRoute = .threads
         model.selectedThreadID = nil
-        if model.route == .cellular || model.route == .about {
+        if model.route == .cellular || model.route == .about
+            || model.route == .ddns || model.route == .portMapping {
             model.route = model.data.isLive ? .main : .connect
         }
     }
@@ -437,6 +446,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var aboutReturnRoute: ShellView.Route = .connect
     private var radioReadInFlight = false
     private var radioReadGeneration = 0
+    private var mobileReadInFlight = false
+    private var ddnsReadInFlight = false
+    private var portMappingReadInFlight = false
     /// Settings are a *separate* data source from the 1 Hz traffic sample. Background reads
     /// never toggle the switches or replace an equal value; only a user write sets
     /// settingsBusy. This is what stopped the control page from flickering every second.
@@ -502,6 +514,69 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         model.disableLocks = { [weak self] in
             self?.mutateRadioLocks("已关闭全部锁定") { try await $0.disableRadioLocks() }
         }
+        model.setAirplaneMode = { [weak self] enabled in
+            self?.mutateMobileNetwork(enabled ? "已开启飞行模式" : "已关闭飞行模式") {
+                try await $0.setAirplaneMode(enabled)
+            }
+        }
+        model.setCellularData = { [weak self] enabled in
+            self?.mutateMobileNetwork(enabled ? "已开启蜂窝数据" : "已关闭蜂窝数据") {
+                try await $0.setCellularData(enabled)
+            }
+        }
+        model.saveAntenna = { [weak self] enabled, type in
+            self?.mutateMobileNetwork(enabled ? "已启用外置天线（\(type.title)）" : "已关闭外置天线") {
+                try await $0.setExternalAntenna(enabled: enabled, type: type)
+            }
+        }
+        model.openDDNS = { [weak self] in
+            guard let self else { return }
+            self.model.route = .ddns
+            self.model.advancedStatus = nil
+            self.reloadMobileNetwork()
+            self.reloadDDNS()
+        }
+        model.closeDDNS = { [weak self] in
+            self?.model.route = .main
+            self?.model.advancedStatus = nil
+        }
+        model.reloadDDNS = { [weak self] in self?.reloadDDNS() }
+        model.saveDDNS = { [weak self] entry, input in
+            guard let self else { throw CancellationError() }
+            try await self.saveDDNS(entry, input)
+        }
+        model.deleteDDNS = { [weak self] entry in
+            guard let self else { throw CancellationError() }
+            try await self.deleteDDNS(entry)
+        }
+        model.setDDNSEnabled = { [weak self] entry, enabled in
+            guard let self else { throw CancellationError() }
+            try await self.setDDNSEnabled(entry, enabled)
+        }
+        model.openPortMapping = { [weak self] in
+            guard let self else { return }
+            self.model.route = .portMapping
+            self.model.advancedStatus = nil
+            self.reloadMobileNetwork()
+            self.reloadPortMappings()
+        }
+        model.closePortMapping = { [weak self] in
+            self?.model.route = .main
+            self?.model.advancedStatus = nil
+        }
+        model.reloadPortMappings = { [weak self] in self?.reloadPortMappings() }
+        model.addPortMapping = { [weak self] input in
+            guard let self else { throw CancellationError() }
+            try await self.addPortMapping(input)
+        }
+        model.deletePortMapping = { [weak self] entry in
+            guard let self else { throw CancellationError() }
+            try await self.deletePortMapping(entry)
+        }
+        model.setPortMappingEnabled = { [weak self] entry, enabled in
+            guard let self else { throw CancellationError() }
+            try await self.setPortMappingEnabled(entry, enabled)
+        }
         model.reserveIP = { [weak self] device, ip in
             guard let self else { throw CancellationError() }
             try await self.reserveIP(for: device, ip: ip)
@@ -529,7 +604,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         model.refreshNow = { [weak self] in
             Task { await self?.refreshOnce(includeSettings: true) }
         }
-        model.onControlsSelected = { [weak self] in self?.reloadSettings(quiet: true) }
+        model.onControlsSelected = { [weak self] in
+            self?.reloadSettings(quiet: true)
+            self?.reloadMobileNetwork()
+            self?.reloadDDNS()
+            self?.reloadPortMappings()
+        }
         model.onSMSSelected = { [weak self] in self?.reloadMessages(quiet: true) }
     }
 
@@ -708,6 +788,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.reloadMessages()
                 self.reloadSettings()
                 self.reloadRadioLocks()
+                self.reloadMobileNetwork()
                 WidgetCenter.shared.reloadAllTimelines()
             } catch {
                 guard self.generation == id else { return }
@@ -895,6 +976,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         settingsGeneration += 1
         radioReadGeneration += 1
         settingsReadInFlight = false; smsQuietReadInFlight = false; radioReadInFlight = false
+        mobileReadInFlight = false; ddnsReadInFlight = false; portMappingReadInFlight = false
         reservationInFlight = false
         lastSettingsReadAt = .distantPast; lastSMSReadAt = .distantPast
         stale = true
@@ -1415,6 +1497,216 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 model.lockStatusIsError = true
                 reloadRadioLocks()
             }
+        }
+    }
+
+    // MARK: Mobile network, DDNS, port mapping
+
+    private func reloadMobileNetwork() {
+        guard let session, let id = activeSessionID, model.data.isLive,
+              !mobileReadInFlight, !model.settingsBusy else { return }
+        let epoch = dataEpoch
+        mobileReadInFlight = true
+        Task {
+            do {
+                let state = try await session.readMobileNetwork()
+                guard self.isCurrent(id, epoch: epoch) else { return }
+                self.mobileReadInFlight = false
+                self.model.mobileNetwork = state
+            } catch {
+                guard self.isCurrent(id, epoch: epoch) else { return }
+                self.mobileReadInFlight = false
+                guard !self.handleSessionFailure(error, id: id, epoch: epoch) else { return }
+                self.model.mobileNetwork = nil
+                self.model.settingsStatus = "移动网络读取失败：\(error.localizedDescription)"
+                self.model.settingsStatusIsError = true
+            }
+        }
+    }
+
+    private func mutateMobileNetwork(_ success: String,
+                                     _ action: @escaping (DeviceSession) async throws -> MobileNetworkState) {
+        guard let session, let id = activeSessionID, model.data.isLive else {
+            model.settingsStatus = "未连接"; model.settingsStatusIsError = true
+            return
+        }
+        let epoch = dataEpoch
+        guard !model.settingsBusy else { return }
+        model.settingsBusy = true
+        model.settingsStatus = nil; model.settingsStatusIsError = false
+        Task {
+            do {
+                let state = try await action(session)
+                guard self.isCurrent(id, epoch: epoch) else { return }
+                self.model.mobileNetwork = state
+                self.model.settingsBusy = false
+                self.model.settingsStatus = success
+            } catch {
+                guard self.isCurrent(id, epoch: epoch) else { return }
+                self.model.settingsBusy = false
+                guard !self.handleSessionFailure(error, id: id, epoch: epoch) else { return }
+                self.model.settingsStatus = "操作失败：\(error.localizedDescription)"
+                self.model.settingsStatusIsError = true
+                self.reloadMobileNetwork()
+            }
+        }
+    }
+
+    private func reloadDDNS() {
+        guard let session, let id = activeSessionID, model.data.isLive,
+              !ddnsReadInFlight else { return }
+        let epoch = dataEpoch
+        ddnsReadInFlight = true
+        model.advancedBusy = true
+        Task {
+            do {
+                let wans = await session.readWANConnections()
+                let entries = try await session.readDDNS()
+                guard self.isCurrent(id, epoch: epoch) else { return }
+                self.ddnsReadInFlight = false
+                self.model.advancedBusy = false
+                if !wans.isEmpty { self.model.wanConnections = wans }
+                self.model.ddnsEntries = entries
+            } catch {
+                guard self.isCurrent(id, epoch: epoch) else { return }
+                self.ddnsReadInFlight = false
+                self.model.advancedBusy = false
+                guard !self.handleSessionFailure(error, id: id, epoch: epoch) else { return }
+                self.model.ddnsEntries = []
+                self.model.advancedStatus = "DDNS 读取失败：\(error.localizedDescription)"
+                self.model.advancedStatusIsError = true
+            }
+        }
+    }
+
+    private func reloadPortMappings() {
+        guard let session, let id = activeSessionID, model.data.isLive,
+              !portMappingReadInFlight else { return }
+        let epoch = dataEpoch
+        portMappingReadInFlight = true
+        model.advancedBusy = true
+        Task {
+            do {
+                let wans = await session.readWANConnections()
+                let entries = try await session.readPortMappings()
+                guard self.isCurrent(id, epoch: epoch) else { return }
+                self.portMappingReadInFlight = false
+                self.model.advancedBusy = false
+                if !wans.isEmpty { self.model.wanConnections = wans }
+                self.model.portMappings = entries
+            } catch {
+                guard self.isCurrent(id, epoch: epoch) else { return }
+                self.portMappingReadInFlight = false
+                self.model.advancedBusy = false
+                guard !self.handleSessionFailure(error, id: id, epoch: epoch) else { return }
+                self.model.portMappings = []
+                self.model.advancedStatus = "端口映射读取失败：\(error.localizedDescription)"
+                self.model.advancedStatusIsError = true
+            }
+        }
+    }
+
+    private func saveDDNS(_ entry: DDNSEntry?, _ input: DDNSInput) async throws {
+        guard let session, let id = activeSessionID, model.data.isLive else {
+            throw CPEError.unsupported("未连接设备。")
+        }
+        let epoch = dataEpoch
+        do {
+            let saved: DDNSEntry
+            if let entry { saved = try await session.updateDDNS(entry, with: input) }
+            else { saved = try await session.addDDNS(input) }
+            guard isCurrent(id, epoch: epoch) else { throw CancellationError() }
+            model.advancedStatus = "已保存 DDNS：\(saved.hostname)"
+            model.advancedStatusIsError = false
+            reloadDDNS()
+        } catch {
+            handleSessionFailure(error, id: id, epoch: epoch)
+            throw error
+        }
+    }
+
+    private func deleteDDNS(_ entry: DDNSEntry) async throws {
+        guard let session, let id = activeSessionID, model.data.isLive else {
+            throw CPEError.unsupported("未连接设备。")
+        }
+        let epoch = dataEpoch
+        do {
+            try await session.deleteDDNS(entry)
+            guard isCurrent(id, epoch: epoch) else { throw CancellationError() }
+            model.advancedStatus = "已删除 DDNS：\(entry.hostname)"
+            model.advancedStatusIsError = false
+            reloadDDNS()
+        } catch {
+            handleSessionFailure(error, id: id, epoch: epoch)
+            throw error
+        }
+    }
+
+    private func setDDNSEnabled(_ entry: DDNSEntry, _ enabled: Bool) async throws {
+        guard let session, let id = activeSessionID, model.data.isLive else {
+            throw CPEError.unsupported("未连接设备。")
+        }
+        let epoch = dataEpoch
+        do {
+            let saved = try await session.setDDNSEnabled(entry, enabled)
+            guard isCurrent(id, epoch: epoch) else { throw CancellationError() }
+            model.advancedStatus = "已\(saved.enabled ? "启用" : "停用") DDNS：\(saved.hostname)"
+            model.advancedStatusIsError = false
+            reloadDDNS()
+        } catch {
+            handleSessionFailure(error, id: id, epoch: epoch)
+            throw error
+        }
+    }
+
+    private func addPortMapping(_ input: PortMappingInput) async throws {
+        guard let session, let id = activeSessionID, model.data.isLive else {
+            throw CPEError.unsupported("未连接设备。")
+        }
+        let epoch = dataEpoch
+        do {
+            let saved = try await session.addPortMapping(input)
+            guard isCurrent(id, epoch: epoch) else { throw CancellationError() }
+            model.advancedStatus = "已添加端口映射：\(saved.localIP) \(saved.externalRange)"
+            model.advancedStatusIsError = false
+            reloadPortMappings()
+        } catch {
+            handleSessionFailure(error, id: id, epoch: epoch)
+            throw error
+        }
+    }
+
+    private func deletePortMapping(_ entry: PortMappingEntry) async throws {
+        guard let session, let id = activeSessionID, model.data.isLive else {
+            throw CPEError.unsupported("未连接设备。")
+        }
+        let epoch = dataEpoch
+        do {
+            try await session.deletePortMapping(entry)
+            guard isCurrent(id, epoch: epoch) else { throw CancellationError() }
+            model.advancedStatus = "已删除端口映射：\(entry.localIP) \(entry.externalRange)"
+            model.advancedStatusIsError = false
+            reloadPortMappings()
+        } catch {
+            handleSessionFailure(error, id: id, epoch: epoch)
+            throw error
+        }
+    }
+
+    private func setPortMappingEnabled(_ entry: PortMappingEntry, _ enabled: Bool) async throws {
+        guard let session, let id = activeSessionID, model.data.isLive else {
+            throw CPEError.unsupported("未连接设备。")
+        }
+        let epoch = dataEpoch
+        do {
+            let saved = try await session.setPortMappingEnabled(entry, enabled)
+            guard isCurrent(id, epoch: epoch) else { throw CancellationError() }
+            model.advancedStatus = "已\(saved.enabled ? "启用" : "停用")端口映射：\(saved.localIP)"
+            model.advancedStatusIsError = false
+            reloadPortMappings()
+        } catch {
+            handleSessionFailure(error, id: id, epoch: epoch)
+            throw error
         }
     }
 

@@ -16,7 +16,7 @@ CPE_PASS='…' ./script/ui_matrix.sh    # 完整 UI 矩阵（单次，约 90 秒
 
 ## 1. 单元测试
 
-`script/test.sh` 跑 `swift test`，共 **143 项**，覆盖协议解析、菜单栏几何、图标双别名、短信发送合并、密码全角拦截、5 秒同步策略、设置写入、断线清空、会话失效、固定 IP 校验、锁小区/锁频段互斥与回读等纯逻辑。**不碰 UI，不碰设备**，所以永远先跑它。
+`script/test.sh` 跑 `swift test`，共 **149 项**，覆盖协议解析、菜单栏几何、图标双别名、短信发送合并、密码全角拦截、5 秒同步策略、设置写入、断线清空、会话失效、固定 IP 校验、锁小区/锁频段互斥与回读、移动网络、DDNS 与端口映射等纯逻辑。**不碰 UI，不碰设备**，所以永远先跑它。
 
 ## 2. UI 矩阵
 
@@ -29,7 +29,7 @@ CPE_PASS='…' ./script/ui_matrix.sh    # 完整 UI 矩阵（单次，约 90 秒
 | 1 · 登录页 | `login-empty`、`login-extra`、`login-fullwidth`、`esc`、`cmdw`、`external-click`、`about` | 不需要会话，必须在登录前跑 |
 | 可达性 | `curl http://$CPE_HOST/` | 设备不在本机网段时，登录必然失败；先判定再决定是否跑已连接页 |
 | 2 · 登录 | 真实登录一次 | 只登一次，后续全部复用同一会话 |
-| 3 · 已连接 | `contextmenu`、`styles`、`keys`、`devices-filter-select`、`a11y`、`controls`、`sms`、`sms-poll`、`relogin` | 需要在线数据 |
+| 3 · 已连接 | `contextmenu`、`styles`、`keys`、`devices-filter-select`、`a11y`、`controls`、`fan-mode`、`mobile`、`advanced`、`sms`、`sms-poll`、`relogin` | 需要在线数据 |
 | 4 · 退出 | `power`、`cmdq` | 会终止进程，因此各自新开实例，必须最后跑 |
 
 ### 覆盖对照
@@ -50,6 +50,9 @@ CPE_PASS='…' ./script/ui_matrix.sh    # 完整 UI 矩阵（单次，约 90 秒
 | §5 设备筛选 | `devices-filter-select` | 四个常驻接入类型筛选（全部 / 2.4Ghz / 5.0Ghz / 以太网），切到 5.0Ghz 后摘要变为 `已显示/总数` |
 | §6 控制页 | `controls` | 模式矩阵、主 SSID、备用通道折叠/展开、重启手风琴 |
 | §6 硬件区 | `controls` | 风扇入口存在、指示灯/风扇无副描述、MLO 预留、重启时间单行 |
+| §6 风扇控制 | `fan-mode` | 入口存在、菜单可展开、切到静音并读回、恢复标准 |
+| §6 移动网络 | `mobile` | 飞行模式 / 蜂窝数据 / 外置天线 / 天线类型 / 网络服务入口 |
+| §6 网络服务 | `advanced` | DDNS 与端口映射页面、添加入口、表单字段、返回 |
 | §7 短信 | `sms` | 列表/详情均无流量·积分胶囊、无快捷芯片、内联回复框存在 |
 | §7 短信 5 秒同步 | `sms-poll` | 进入短信页后 7 秒内同步时间戳发生更新 |
 | §8.4 无障碍 | `a11y` | 六个页面（四页签 + 蜂窝详情 + 会话）内所有按钮/开关/单选必须有名称；滚动条系统控件除外 |
@@ -57,7 +60,7 @@ CPE_PASS='…' ./script/ui_matrix.sh    # 完整 UI 矩阵（单次，约 90 秒
 
 `a11y` 还带两个防假通过条件：应用未运行直接 FAIL；扫到的页面少于 6 个也 FAIL。
 
-2026-10-18 实跑（设备在线）：**56 passed, 0 failed, 0 skipped（约 100 秒）**，含 `about` 与 `relogin`。此前三项失败是探针选择器过期（旧「筛选胶囊」「写短信」「回复内容」标签），已改为当前界面的四个常驻筛选、`新消息`、`短信内容`。
+2026-10-18 实跑（设备在线）：**72 passed, 0 failed, 0 skipped（121 秒）**，含 `about`、`relogin`、`fan-mode`、`mobile`、`advanced`。此前三项失败是探针选择器过期（旧「筛选胶囊」「写短信」「回复内容」标签），已改为当前界面的四个常驻筛选、`新消息`、`短信内容`。
 
 `tabs` 场景已删除：它的四个页面落点断言与 `keys` 完全重复，只是多花 5 秒。
 

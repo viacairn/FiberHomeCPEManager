@@ -35,6 +35,27 @@ struct Probe {
 
         let arguments = Array(CommandLine.arguments.dropFirst())
 
+        if arguments.first == "--network-audit" {
+            await auditNetwork(session)
+            await session.close()
+            exit(0)
+        }
+        if arguments.first == "--port-add-test" {
+            await portAddTest(session)
+            await session.close()
+            exit(0)
+        }
+        if arguments.first == "--ddns-add-test" {
+            await ddnsAddTest(session)
+            await session.close()
+            exit(0)
+        }
+        if arguments.first == "--mobile-test" {
+            await mobileTest(session)
+            await session.close()
+            exit(0)
+        }
+
         // `--sms-list` prints conversations; `--sms-send NUMBER BODY` sends one message and
         // re-lists after a short wait, which is how outbound + inbox sync are verified
         // without driving the UI.
@@ -135,6 +156,89 @@ struct Probe {
             }
         } catch { print("session audit failed: \(error)") }
         await first.close(); await second.close()
+    }
+
+    /// Read-only snapshot of the nodes added for the mobile/DDNS/port-mapping pages.
+    static func auditNetwork(_ session: DeviceSession) async {
+        do {
+            let mobile = try await session.readMobileNetwork()
+            print("mobile: airplane=\(mobile.airplaneMode) data=\(mobile.cellularDataEnabled) "
+                + "antenna=\(mobile.antennaEnabled) type=\(mobile.antennaType?.title ?? "-") "
+                + "wan=\(mobile.cellularWAN?.title ?? "-")")
+            let ddns = try await session.readDDNS()
+            print("ddns: \(ddns.count)")
+            for entry in ddns {
+                print("  \(entry.providerTitle) \(entry.hostname) enabled=\(entry.enabled) wan=\(entry.wan.title)")
+            }
+            let ports = try await session.readPortMappings()
+            print("port mappings: \(ports.count)")
+            for entry in ports {
+                print("  \(entry.wan.title) \(entry.localIP) \(entry.internalRange)->\(entry.externalRange) "
+                    + "\(entry.proto.title) enabled=\(entry.enabled)")
+            }
+        } catch {
+            print("network audit failed: \(error)")
+        }
+    }
+
+    /// Adds one disabled mapping, reads it back, then deletes it. Used only by explicit
+    /// manual verification; never part of the normal test suite.
+    static func portAddTest(_ session: DeviceSession) async {
+        do {
+            let mobile = try await session.readMobileNetwork()
+            guard let wan = mobile.cellularWAN else { print("no cellular WAN"); return }
+            let input = PortMappingInput(wan: wan, localIP: "198.51.100.23",
+                                         internalPort: 59999, internalEnd: 59999,
+                                         externalPort: 59999, externalEnd: 59999,
+                                         proto: .tcp, enabled: false)
+            let entry = try await session.addPortMapping(input)
+            print("added port mapping: \(entry.id) \(entry.localIP) \(entry.internalRange)")
+            try await session.deletePortMapping(entry)
+            print("deleted port mapping: \(entry.id)")
+            print("remaining: \(try await session.readPortMappings().count)")
+        } catch {
+            print("port add test failed: \(error)")
+        }
+    }
+
+    /// Re-writes the current airplane/data values (no state change), toggles the external
+    /// antenna off and back on, and reads the state after each step.
+    static func mobileTest(_ session: DeviceSession) async {
+        do {
+            let before = try await session.readMobileNetwork()
+            print("before: airplane=\(before.airplaneMode) data=\(before.cellularDataEnabled) "
+                + "antenna=\(before.antennaEnabled) type=\(before.antennaType?.title ?? "-")")
+            _ = try await session.setAirplaneMode(before.airplaneMode)
+            print("airplane same-value write: ok")
+            _ = try await session.setCellularData(before.cellularDataEnabled)
+            print("cellular same-value write: ok")
+            let type = before.antennaType ?? .automatic
+            let toggled = try await session.setExternalAntenna(enabled: !before.antennaEnabled, type: type)
+            print("antenna toggled: \(toggled.antennaEnabled)")
+            _ = try await session.setExternalAntenna(enabled: before.antennaEnabled, type: type)
+            let after = try await session.readMobileNetwork()
+            print("after: airplane=\(after.airplaneMode) data=\(after.cellularDataEnabled) "
+                + "antenna=\(after.antennaEnabled) type=\(after.antennaType?.title ?? "-")")
+        } catch {
+            print("mobile test failed: \(error)")
+        }
+    }
+
+    /// Adds one disabled DDNS entry, reads it back, then deletes it.
+    static func ddnsAddTest(_ session: DeviceSession) async {
+        do {
+            let mobile = try await session.readMobileNetwork()
+            guard let wan = mobile.cellularWAN else { print("no cellular WAN"); return }
+            let input = DDNSInput(wan: wan, provider: "dyndns", hostname: "fhcpem-test.invalid",
+                                  username: "fhcpem", password: "test-only", enabled: false)
+            let entry = try await session.addDDNS(input)
+            print("added ddns: \(entry.id) \(entry.hostname) enabled=\(entry.enabled)")
+            try await session.deleteDDNS(entry)
+            print("deleted ddns: \(entry.id)")
+            print("remaining: \(try await session.readDDNS().count)")
+        } catch {
+            print("ddns add test failed: \(error)")
+        }
     }
 }
 

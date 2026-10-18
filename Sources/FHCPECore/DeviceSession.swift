@@ -18,6 +18,9 @@ public actor DeviceSession {
     private let adapter: LG6851Adapter
     private lazy var extended = LG6851ExtendedAdapter(rpc: transport)
     private lazy var radioLocks = RadioLockService(rpc: transport)
+    private lazy var mobileNetwork = MobileNetworkService(rpc: transport)
+    private lazy var ddnsService = DDNSService(rpc: transport)
+    private lazy var portMappingService = PortMappingService(rpc: transport)
     private var refreshing = false
     private var receiveCounter = TrafficCounter()
     private var sendCounter = TrafficCounter()
@@ -130,6 +133,45 @@ public actor DeviceSession {
     }
     public func reserveIP(mac: String, ip: String) async throws {
         _ = try await DHCPReservationService(rpc: transport).reserve(mac: mac, ip: ip)
+    }
+
+    // MARK: Mobile network / DDNS / port mapping (stock page contracts)
+
+    public func readMobileNetwork() async throws -> MobileNetworkState {
+        try await mobileNetwork.read()
+    }
+    public func readWANConnections() async -> [WANConnectionRef] {
+        await WANDiscovery.connections(transport)
+    }
+    public func setAirplaneMode(_ enabled: Bool) async throws -> MobileNetworkState {
+        try await mobileNetwork.setAirplaneMode(enabled)
+    }
+    public func setCellularData(_ enabled: Bool) async throws -> MobileNetworkState {
+        try await mobileNetwork.setCellularData(enabled)
+    }
+    public func setExternalAntenna(enabled: Bool, type: AntennaType) async throws -> MobileNetworkState {
+        try await mobileNetwork.setAntenna(enabled: enabled, type: type)
+    }
+
+    public func readDDNS() async throws -> [DDNSEntry] { try await ddnsService.read() }
+    public func addDDNS(_ input: DDNSInput) async throws -> DDNSEntry { try await ddnsService.add(input) }
+    public func updateDDNS(_ entry: DDNSEntry, with input: DDNSInput) async throws -> DDNSEntry {
+        try await ddnsService.update(entry, with: input)
+    }
+    public func deleteDDNS(_ entry: DDNSEntry) async throws { try await ddnsService.delete(entry) }
+    public func setDDNSEnabled(_ entry: DDNSEntry, _ enabled: Bool) async throws -> DDNSEntry {
+        try await ddnsService.setEnabled(entry, enabled)
+    }
+
+    public func readPortMappings() async throws -> [PortMappingEntry] { try await portMappingService.read() }
+    public func addPortMapping(_ input: PortMappingInput) async throws -> PortMappingEntry {
+        try await portMappingService.add(input)
+    }
+    public func deletePortMapping(_ entry: PortMappingEntry) async throws {
+        try await portMappingService.delete(entry)
+    }
+    public func setPortMappingEnabled(_ entry: PortMappingEntry, _ enabled: Bool) async throws -> PortMappingEntry {
+        try await portMappingService.setEnabled(entry, enabled)
     }
 
     /// An outage must not turn a pre-outage counter into the next live speed sample.

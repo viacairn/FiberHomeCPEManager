@@ -123,6 +123,44 @@ final class Renderer {
             model.radioLocks = RadioLockState(cells: [LockedCell(index: 1, act: 2, arfcn: 634464, pci: 101)], lteBands: [1, 3], nrBands: [78])
             return ShellView(model: model)
         }
+
+        let wan = WANConnectionRef(device: 1, link: .ipoe, name: "1_INTERNET_R_VID_", enabled: true)
+        render("22-controls-mobile", width: Theme.compactWidth, height: Theme.compactHeight) {
+            let model = fixtures.connected(tab: 2)
+            model.mobileNetwork = MobileNetworkState(airplaneMode: false, cellularDataEnabled: true,
+                                                     antennaEnabled: true, antennaType: .n78n77,
+                                                     cellularWAN: wan)
+            model.wanConnections = [wan]
+            return ShellView(model: model)
+        }
+        render("20-ddns", width: Theme.compactWidth, height: Theme.compactHeight) {
+            let model = fixtures.connected(tab: 2)
+            model.route = .ddns
+            model.wanConnections = [wan]
+            model.ddnsEntries = [
+                DDNSEntry(wan: wan, index: 1, provider: "dyndns", hostname: "home.example.com",
+                          username: "admin", password: "secret", enabled: true),
+                DDNSEntry(wan: wan, index: 2, provider: "No-IP.com", hostname: "fhcpem.ddns.net",
+                          username: "fhcpem", password: "secret", enabled: false)
+            ]
+            return ShellView(model: model)
+        }
+        render("21-portmap", width: Theme.compactWidth, height: Theme.compactHeight) {
+            let model = fixtures.connected(tab: 2)
+            model.route = .portMapping
+            model.wanConnections = [wan]
+            model.portMappings = [
+                PortMappingEntry(wan: wan, index: 1, localIP: "192.168.8.120",
+                                 internalPort: 8080, internalEnd: 8080,
+                                 externalPort: 18080, externalEnd: 18080,
+                                 proto: .tcp, enabled: true),
+                PortMappingEntry(wan: wan, index: 2, localIP: "192.168.8.121",
+                                 internalPort: 9000, internalEnd: 9010,
+                                 externalPort: 19000, externalEnd: 19010,
+                                 proto: .both, enabled: false)
+            ]
+            return ShellView(model: model)
+        }
     }
 
     func render(_ name: String, width: CGFloat, height: CGFloat, @ViewBuilder body: () -> some View) {

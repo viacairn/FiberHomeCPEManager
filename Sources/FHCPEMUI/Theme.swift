@@ -375,16 +375,20 @@ public struct MetricCell: View {
     public let unit: String?
     public let caption: String
     public var valueFont: Font = Theme.metricValue
+    public var unitFont: Font = Theme.metricUnit
+    public var captionFont: Font = Theme.metricCaption
     public var accessibilityValue: String?
 
     public init(value: String?, unit: String?, caption: String,
-                valueFont: Font = Theme.metricValue, accessibilityValue: String? = nil) {
+                valueFont: Font = Theme.metricValue, unitFont: Font = Theme.metricUnit,
+                captionFont: Font = Theme.metricCaption, accessibilityValue: String? = nil) {
         self.value = value; self.unit = unit; self.caption = caption
-        self.valueFont = valueFont; self.accessibilityValue = accessibilityValue
+        self.valueFont = valueFont; self.unitFont = unitFont
+        self.captionFont = captionFont; self.accessibilityValue = accessibilityValue
     }
 
     public var body: some View {
-        VStack(spacing: 3) {
+        VStack(spacing: 2) {
             HStack(alignment: .firstTextBaseline, spacing: 3) {
                 Text(value ?? "—")
                     .font(valueFont)
@@ -394,13 +398,13 @@ public struct MetricCell: View {
                     .contentTransition(.numericText())
                 if let unit, value != nil {
                     Text(unit)
-                        .font(Theme.metricUnit)
+                        .font(unitFont)
                         .foregroundStyle(Theme.inkSecondary)
                 }
             }
             .frame(maxWidth: .infinity)
             Text(caption)
-                .font(Theme.metricCaption)
+                .font(captionFont)
                 .foregroundStyle(Theme.inkSecondary)
         }
         .frame(maxWidth: .infinity)
@@ -415,15 +419,18 @@ public struct StatCell: View {
     public let label: String
     public let value: String?
     public var valueFont: Font = Theme.value
+    public var labelFont: Font = Theme.label
     public var alignment: HorizontalAlignment = .center
 
-    public init(label: String, value: String?, valueFont: Font = Theme.value, alignment: HorizontalAlignment = .center) {
-        self.label = label; self.value = value; self.valueFont = valueFont; self.alignment = alignment
+    public init(label: String, value: String?, valueFont: Font = Theme.value,
+                labelFont: Font = Theme.label, alignment: HorizontalAlignment = .center) {
+        self.label = label; self.value = value
+        self.valueFont = valueFont; self.labelFont = labelFont; self.alignment = alignment
     }
 
     public var body: some View {
         VStack(alignment: alignment, spacing: 3) {
-            Text(label).font(Theme.label).foregroundStyle(Theme.inkSecondary)
+            Text(label).font(labelFont).foregroundStyle(Theme.inkSecondary)
             Text(value ?? "—")
                 .font(valueFont)
                 .foregroundStyle(value == nil ? Theme.inkMuted : Color.primary)

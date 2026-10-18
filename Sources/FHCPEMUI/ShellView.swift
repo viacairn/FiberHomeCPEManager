@@ -6,7 +6,7 @@ import FHCPECore
 /// callbacks so the layout can be rendered (and screenshot-tested) without a session.
 public struct ShellView: View {
     public enum Route: Equatable, Sendable {
-        case connect, main, cellular, about
+        case connect, main, cellular, about, ddns, portMapping
     }
 
     @Bindable public var model: ShellModel
@@ -75,7 +75,8 @@ public struct ShellView: View {
             model.tab = newValue
             model.smsRoute = .threads
             model.selectedThreadID = nil
-            if model.route == .cellular || model.route == .about {
+            if model.route == .cellular || model.route == .about
+                || model.route == .ddns || model.route == .portMapping {
                 model.route = model.data.isLive ? .main : .connect
             }
         })
@@ -107,6 +108,20 @@ public struct ShellView: View {
                                 .padding(.bottom, 6)
                         }
                     }
+            case .ddns:
+                DDNSPage(entries: model.ddnsEntries, wans: model.wanConnections,
+                         busy: model.advancedBusy, status: model.advancedStatus,
+                         statusIsError: model.advancedStatusIsError,
+                         onBack: model.closeDDNS, onReload: model.reloadDDNS,
+                         onSave: model.saveDDNS, onDelete: model.deleteDDNS,
+                         onToggle: model.setDDNSEnabled)
+            case .portMapping:
+                PortMappingPage(entries: model.portMappings, wans: model.wanConnections,
+                                busy: model.advancedBusy, status: model.advancedStatus,
+                                statusIsError: model.advancedStatusIsError,
+                                onBack: model.closePortMapping, onReload: model.reloadPortMappings,
+                                onAdd: model.addPortMapping, onDelete: model.deletePortMapping,
+                                onToggle: model.setPortMappingEnabled)
             case .main:
                 switch model.tab {
                 case 1:
@@ -123,7 +138,15 @@ public struct ShellView: View {
                                  onSaveLED: model.saveLED,
                                  onSaveFan: model.saveFan,
                                  switchingTo: model.uplinkSwitchTarget,
-                                 onSwitchUplink: model.switchUplink)
+                                 onSwitchUplink: model.switchUplink,
+                                 mobile: model.data.isLive ? model.mobileNetwork : nil,
+                                 onSetAirplaneMode: model.setAirplaneMode,
+                                 onSetCellularData: model.setCellularData,
+                                 onSaveAntenna: model.saveAntenna,
+                                 ddnsCount: model.data.isLive ? model.ddnsEntries.count : nil,
+                                 portMappingCount: model.data.isLive ? model.portMappings.count : nil,
+                                 onOpenDDNS: model.openDDNS,
+                                 onOpenPortMapping: model.openPortMapping)
                 case 3:
                     SMSPage(threads: model.threads, route: model.smsRoute,
                             selectedThread: model.threads.first { $0.id == model.selectedThreadID },
@@ -189,6 +212,15 @@ public struct ShellView: View {
     public var cellularTab = 0
     public var busy = false
 
+    // Advanced network pages
+    public var mobileNetwork: MobileNetworkState?
+    public var wanConnections: [WANConnectionRef] = []
+    public var ddnsEntries: [DDNSEntry] = []
+    public var portMappings: [PortMappingEntry] = []
+    public var advancedBusy = false
+    public var advancedStatus: String?
+    public var advancedStatusIsError = false
+
     public var draftAddress: String
     public var draftUsername: String
     public var draftPassword: String
@@ -233,6 +265,33 @@ public struct ShellView: View {
     public var updateLockedCell: (LockedCell) -> Void = { _ in }
     public var deleteLockedCell: (LockedCell) -> Void = { _ in }
     public var disableLocks: () -> Void = {}
+    public var setAirplaneMode: (Bool) -> Void = { _ in }
+    public var setCellularData: (Bool) -> Void = { _ in }
+    public var saveAntenna: (Bool, AntennaType) -> Void = { _, _ in }
+    public var openDDNS: () -> Void = {}
+    public var closeDDNS: () -> Void = {}
+    public var reloadDDNS: () -> Void = {}
+    public var saveDDNS: (DDNSEntry?, DDNSInput) async throws -> Void = { _, _ in
+        throw CPEError.unsupported("未连接设备。")
+    }
+    public var deleteDDNS: (DDNSEntry) async throws -> Void = { _ in
+        throw CPEError.unsupported("未连接设备。")
+    }
+    public var setDDNSEnabled: (DDNSEntry, Bool) async throws -> Void = { _, _ in
+        throw CPEError.unsupported("未连接设备。")
+    }
+    public var openPortMapping: () -> Void = {}
+    public var closePortMapping: () -> Void = {}
+    public var reloadPortMappings: () -> Void = {}
+    public var addPortMapping: (PortMappingInput) async throws -> Void = { _ in
+        throw CPEError.unsupported("未连接设备。")
+    }
+    public var deletePortMapping: (PortMappingEntry) async throws -> Void = { _ in
+        throw CPEError.unsupported("未连接设备。")
+    }
+    public var setPortMappingEnabled: (PortMappingEntry, Bool) async throws -> Void = { _, _ in
+        throw CPEError.unsupported("未连接设备。")
+    }
     public var reserveIP: (@MainActor (ConnectedDevice, String) async throws -> Void)?
     public var refreshCells: () -> Void = {}
     public var applyLock: (CellRecord?) -> Void = { _ in }
@@ -279,5 +338,7 @@ public struct ShellView: View {
         smsStatus = nil; smsStatusIsError = false
         settingsStatus = nil; settingsStatusIsError = false
         lockStatus = nil; lockStatusIsError = false
+        mobileNetwork = nil; wanConnections = []; ddnsEntries = []; portMappings = []
+        advancedBusy = false; advancedStatus = nil; advancedStatusIsError = false
     }
 }

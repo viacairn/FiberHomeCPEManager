@@ -21,8 +21,8 @@ FiberHome LG6851F 5G CPE 的原生 macOS 菜单栏控制台与桌面磁贴。Swi
 ```sh
 ./script/build_and_run.sh            # 构建、打包、ad-hoc 签名并启动
 ./script/build_and_run.sh --build-only
-./script/test.sh                     # 143 项单元 / 端到端测试
-./script/ui_matrix.sh                # 56 项 UI 交互检查（可带 CPE_PASS 验证登录后页面）
+./script/test.sh                     # 149 项单元 / 端到端测试
+./script/ui_matrix.sh                # 72 项 UI 交互检查（可带 CPE_PASS 验证登录后页面）
 ```
 
 产物为 `build/FiberHomeCPEManager.app`，内含 `Contents/PlugIns/FiberHomeCPEManagerWidget.appex`（桌面磁贴）。使用本地 ad-hoc 签名，不含公证。
@@ -35,12 +35,12 @@ FiberHome LG6851F 5G CPE 的原生 macOS 菜单栏控制台与桌面磁贴。Swi
 
 | 页面 | 内容 |
 | --- | --- |
-| 概览 | 大号中国联通、以太网/蜂窝 IP、右上角 `5G`/`SA`/`N78`、右下角已注册/以太网已连接状态、实时速率与流量、九项蜂窝摘要 |
+| 概览 | 大号中国联通、以太网/蜂窝 IP、右上角 `5G`/`SA`/`N78`、右下角已注册/以太网已连接状态、实时速率与流量（紧凑字号）、4×3 十二项蜂窝摘要（QCI 承载等级在第一列） |
 | 设备 | 单个不分组列表、搜索框旁胶囊筛选、真实在线数；图标可右键指定并按 MAC + 主机名绑定；右键「设置固定 IP…」写入 DHCP 保留 |
-| 控制 | Wi-Fi 广播开关/改名、定时重启、机身指示灯、风扇模式均写入后重读；上行切换需二次确认并自动重连 |
+| 控制 | Wi-Fi 广播开关/改名、定时重启、机身指示灯、风扇模式（按钮弹出三档、当前项打勾）、飞行模式、蜂窝数据、外置天线；DDNS / 端口映射入口；上行切换需二次确认并自动重连 |
 | 短信 | 会话列表 / 正文 / 内联回复 / 撰写；停留短信页时每 5 秒调用 `get_sms_data`，只存内存；断线显示断开态 |
-| 蜂窝详情 | 350 pt 页面内两分段滚动：技术指标三分组 + 邻区列表 + 锁小区 / 锁频段（互斥、最多 20 个候选） |
-| 连接 | FiberHome CPE Manager；设备 IP（只填 IP）、账号、密码与「保存密码」同一行；全角密码/首尾空格在发送前拦截 |
+| 基站与小区 | 单页：载波聚合 + 补充射频 + 邻区列表 + 锁小区 / 锁频段（互斥、最多 20 个候选）；不再重复概览字段 |
+| 连接 | 18 pt「FiberHome CPE Manager」标题；设备 IP（只填 IP）、账号、密码与「保存密码」同一行；全角密码/首尾空格在发送前拦截；无常驻提示小字 |
 
 菜单栏有两种模式：**仅信号强度**（四根柱）与 **信号强度 + 网速**（柱 + `128 Kbps` / `12.8 Mbps` / `1.28 Gbps`，最多三位有效数字）。
 
@@ -86,6 +86,7 @@ FiberHome LG6851F 5G CPE 的原生 macOS 菜单栏控制台与桌面磁贴。Swi
 - [实现状态](docs/IMPLEMENTATION-STATUS.md)：已实现范围与明确未启用项。
 - [需求核验清单](docs/VERIFICATION-2026-10-18.md)：逐条需求、代码位置与实测结果。
 - [协议基线](docs/protocol/RP0112.md)：FHAPIS 传输、加密协商与测试向量。
+- [高级控制契约](docs/protocol/ADVANCED-CONTROLS-2026-10-18.md)：风扇、移动网络、DDNS、端口映射的节点与真机回环。
 
 真机关键反例（这些直接改变了实现）：
 
@@ -116,6 +117,7 @@ python3 script/cdp.py eval "<read-only expression>"
 
 - 接入类型按真机观测的 `WLANConfiguration` 索引惯例映射（5→5G，1→2.4G）；`OperatingFrequencyBand` 在真机返回空，未知索引显示「未知接入」。
 - 短信正文读取与发送已在真机验证（发送后 `get_sms_data` 立即回读）；锁小区/锁频段与固定 IP 的写契约已用真机同值回写验证，但未真正切换运行状态；主动扫描、设备重启、上行模式切换仍未在界面开放。
+- 风扇、外置天线已做真机切换/恢复；飞行模式与蜂窝数据只做了同值写回，未真正断网验证。DDNS 未验证实际解析，端口映射未验证外部可达性。
 - 设备同一时刻只承认最后一个登录入口：两个原生会话可并存，浏览器与原生会互相挤占；被挤占方回到登录页，客户端不自动循环重登（见 [会话互斥实测](docs/protocol/SESSION-CONTENTION.md)）。
 - 磁贴在 ad-hoc 签名下能否出现在系统图库取决于 PlugInKit；未宣称已验证，必要时需 Developer ID 签名。
 - 仅适配 LG6851F / RP0112；RP0106–RP0111 与其他型号未验证。

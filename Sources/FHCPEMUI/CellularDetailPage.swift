@@ -63,21 +63,10 @@ public struct CellularDetailPage: View {
 
     public var body: some View {
         VStack(spacing: 0) {
-            SubpageBar(title: "蜂窝详情", onBack: onBack)
-            segment
-                .padding(.horizontal, Theme.contentPadding)
-                .padding(.top, 8)
-            Group {
-                switch tab {
-                case 0: metricsTab
-                default: cellsTab
-                }
-            }
-            .frame(maxHeight: .infinity, alignment: .top)
-            .onAppear {
-                if initialTab != 0 { tab = initialTab }
-                loadBandDrafts()
-            }
+            SubpageBar(title: "基站与小区", onBack: onBack)
+            cellsTab
+                .frame(maxHeight: .infinity, alignment: .top)
+                .onAppear { loadBandDrafts() }
         }
         .onChange(of: lockState) { _, _ in loadBandDrafts() }
         .onChange(of: data.isLive) { _, live in
@@ -385,9 +374,25 @@ public struct CellularDetailPage: View {
 
     // MARK: - Tab 1: Base Station & Cells (基站与小区)
 
+    /// Fields the overview does not carry, kept on the detail page.
+    private var supplementalRF: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            PanelHeading("补充射频")
+            Panel(padding: 9, spacing: 5) {
+                HStack(spacing: 6) {
+                    StatCell(label: "发射功率", value: FieldFormat.dbm(data.radio.power),
+                             valueFont: .system(size: 11.5, weight: .bold).monospacedDigit())
+                    Spacer(minLength: 0)
+                }
+            }
+        }
+    }
+
     private var cellsTab: some View {
         ScrollView(.vertical) {
             VStack(alignment: .leading, spacing: 9) {
+                carrierAggregation
+                supplementalRF
                 HStack(alignment: .center) {
                     HStack(spacing: 6) {
                         PanelHeading("可发现基站与邻区")
