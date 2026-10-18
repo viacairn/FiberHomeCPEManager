@@ -327,7 +327,7 @@ case "tabs":
     openPopover()
     // Each tab must expose its page and a real value from the device.
     let expectations: [(String, String)] = [
-        ("概览", "蜂窝信息"), ("设备", "全部"), ("控制", "上行运行模式"), ("短信", "写短信")
+        ("概览", "蜂窝信息"), ("设备", "全部"), ("控制", "上行运行模式"), ("短信", "新消息")
     ]
     for (index, expected) in expectations.enumerated() {
         tapTab(index: index)
@@ -583,7 +583,7 @@ case "a11y":
         }
     }
 
-    let markers = ["蜂窝信息", "全部", "上行运行模式", "写短信"]
+    let markers = ["蜂窝信息", "全部", "上行运行模式", "新消息"]
     for (index, marker) in markers.enumerated() {
         pressKey(CGKeyCode(18 + index), flags: .maskCommand)
         _ = waitFor(2.0) {
@@ -661,7 +661,7 @@ case "sms":
     }
     check("详情页无置顶信息胶囊", threadCapsules.isEmpty)
     check("无快捷指令胶囊", !threadLabels.contains { $0.contains("发送流量查询") })
-    check("内联回复框", threadLabels.contains("回复内容"))
+    check("内联回复框", threadLabels.contains("短信内容") || threadLabels.contains("发送短信"))
 
 case "sms-poll":
     // Enter the SMS page, then prove get_sms_data is polled again within five seconds.
@@ -908,36 +908,34 @@ case "devices-filter-select":
     pressKey(19, flags: .maskCommand)
     usleep(900_000)
     guard let root = popoverRoot() else { print("  FAIL no popover"); break }
-    guard let filter = descendants(root).first(where: {
-        attribute($0, kAXRoleAttribute) == "AXButton" &&
-        attribute($0, kAXDescriptionAttribute).contains("接入类型筛选，当前 全部")
-    }) else { print("  FAIL filter button missing"); break }
-    click(filter)
+    // Four always-visible access filters, each an AXButton whose label is "标题，N 台".
+    let filterButton: (String, AXUIElement) -> AXUIElement? = { title, root in
+        descendants(root).first {
+            attribute($0, kAXRoleAttribute) == "AXButton" &&
+            attribute($0, kAXDescriptionAttribute).hasPrefix(title + "，") &&
+            attribute($0, kAXDescriptionAttribute).contains("台")
+        }
+    }
+    let titles = ["全部", "2.4Ghz", "5.0Ghz", "以太网"]
+    let missing = titles.filter { filterButton($0, root) == nil }
+    check("四个接入类型筛选常驻", missing.isEmpty, missing.joined(separator: ", "))
+    guard let five = filterButton("5.0Ghz", root) else { print("  FAIL filter button missing"); break }
+    click(five)
     usleep(900_000)
-    guard let option = descendants(popoverRoot() ?? root).first(where: {
-        attribute($0, kAXRoleAttribute) == "AXButton" &&
-        attribute($0, kAXDescriptionAttribute).contains("5G") &&
-        attribute($0, kAXDescriptionAttribute).contains("台")
-    }) else { print("  FAIL 5G filter option missing"); break }
-    click(option)
-    usleep(900_000)
-    let after = descendants(popoverRoot() ?? root).flatMap {
+    let filtered = descendants(popoverRoot() ?? root).flatMap {
         [attribute($0, kAXDescriptionAttribute), attribute($0, kAXValueAttribute)]
     }
-    check("筛选胶囊切到 5G", after.contains { $0.contains("接入类型筛选，当前 5G") })
-    check("设备列表按 5G 过滤",
-          after.contains { $0.contains("/") && $0.contains("台") },
-          after.first { $0.contains("/") && $0.contains("台") } ?? "no count")
+    let counts = filtered.filter { $0.contains("/") && $0.contains("台") }
+    check("筛选切到 5.0Ghz", !counts.isEmpty, counts.first ?? "no count")
+    let narrowed = counts.contains { value in
+        let digits = value.replacingOccurrences(of: " 台", with: "").split(separator: "/")
+        guard digits.count == 2, let shown = Int(digits[0]), let total = Int(digits[1]) else { return false }
+        return shown > 0 && shown < total
+    }
+    check("设备列表按 5.0Ghz 过滤", narrowed, counts.first ?? "no count")
     // Restore the default filter for subsequent scenarios.
-    if let open = descendants(popoverRoot() ?? root).first(where: {
-        attribute($0, kAXRoleAttribute) == "AXButton" &&
-        attribute($0, kAXDescriptionAttribute).contains("接入类型筛选")
-    }) {
-        click(open); usleep(700_000)
-        if let all = descendants(popoverRoot() ?? root).first(where: {
-            attribute($0, kAXRoleAttribute) == "AXButton" &&
-            attribute($0, kAXDescriptionAttribute).contains("全部，9 台")
-        }) { click(all); usleep(500_000) }
+    if let all = filterButton("全部", popoverRoot() ?? root) {
+        click(all); usleep(500_000)
     }
 
 case "controls-dump":
@@ -963,8 +961,8 @@ case "compose-dump":
     guard let root = popoverRoot() else { print("  FAIL no popover"); break }
     guard let compose = descendants(root).first(where: {
         attribute($0, kAXRoleAttribute) == "AXButton" &&
-        attribute($0, kAXDescriptionAttribute) == "写短信"
-    }) else { print("  FAIL 写短信 missing"); break }
+        attribute($0, kAXDescriptionAttribute) == "新消息"
+    }) else { print("  FAIL 新消息 missing"); break }
     click(compose)
     usleep(1_000_000)
     guard let composeRoot = popoverRoot() else { print("  FAIL compose did not open"); break }
@@ -1006,9 +1004,9 @@ case "sms-compose-send":
     guard let root = popoverRoot() else { print("  FAIL no popover"); break }
     guard let compose = descendants(root).first(where: {
         attribute($0, kAXRoleAttribute) == "AXButton" &&
-        attribute($0, kAXDescriptionAttribute) == "写短信"
+        attribute($0, kAXDescriptionAttribute) == "新消息"
     }) else {
-        print("  FAIL 写短信 button missing")
+        print("  FAIL 新消息 button missing")
         break
     }
     click(compose)
@@ -1146,7 +1144,7 @@ case "keys":
     // ⌘1…⌘4 switch the bottom tabs (US layout key codes 18…21).
     let tabKeys: [(CGKeyCode, String, String)] = [
         (18, "概览", "蜂窝信息"), (19, "设备", "全部"),
-        (20, "控制", "上行运行模式"), (21, "短信", "写短信")
+        (20, "控制", "上行运行模式"), (21, "短信", "新消息")
     ]
     for (code, name, marker) in tabKeys {
         pressKey(code, flags: .maskCommand)

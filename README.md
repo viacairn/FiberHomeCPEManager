@@ -22,7 +22,7 @@ FiberHome LG6851F 5G CPE 的原生 macOS 菜单栏控制台与桌面磁贴。Swi
 ./script/build_and_run.sh            # 构建、打包、ad-hoc 签名并启动
 ./script/build_and_run.sh --build-only
 ./script/test.sh                     # 143 项单元 / 端到端测试
-./script/ui_matrix.sh                # UI 交互检查（可带 CPE_PASS 验证登录后页面）
+./script/ui_matrix.sh                # 52 项 UI 交互检查（可带 CPE_PASS 验证登录后页面）
 ```
 
 产物为 `build/FiberHomeCPEManager.app`，内含 `Contents/PlugIns/FiberHomeCPEManagerWidget.appex`（桌面磁贴）。使用本地 ad-hoc 签名，不含公证。
@@ -84,6 +84,7 @@ FiberHome LG6851F 5G CPE 的原生 macOS 菜单栏控制台与桌面磁贴。Swi
 - [真机只读验证记录](docs/protocol/LIVE-VERIFIED-2026-10-17.md)：字段语义、70+ 条实测结论与反例（如 `SIMStatus=0` 但网络可用）。
 - [兼容表](docs/COMPATIBILITY.md)：逐字段验证状态，明确标注「观测惯例」与「未解决」。
 - [实现状态](docs/IMPLEMENTATION-STATUS.md)：已实现范围与明确未启用项。
+- [需求核验清单](docs/VERIFICATION-2026-10-18.md)：逐条需求、代码位置与实测结果。
 - [协议基线](docs/protocol/RP0112.md)：FHAPIS 传输、加密协商与测试向量。
 
 真机关键反例（这些直接改变了实现）：
