@@ -17,7 +17,28 @@ import sys
 import urllib.request
 from urllib.parse import urlparse
 
-PORT = 9222
+import os
+
+
+def _pick_port():
+    """CDP_PORT wins; otherwise the first of 9222/9223 that serves /json/list.
+
+    Chrome's chrome://inspect remote-debugging mode has no HTTP /json endpoint, so a
+    port that answers with an empty body is skipped.
+    """
+    if os.environ.get("CDP_PORT"):
+        return int(os.environ["CDP_PORT"])
+    for port in (9222, 9223):
+        try:
+            with urllib.request.urlopen(f"http://localhost:{port}/json/list", timeout=2) as r:
+                if json.loads(r.read().decode()):
+                    return port
+        except Exception:
+            continue
+    return 9222
+
+
+PORT = _pick_port()
 BASE = f"http://localhost:{PORT}"
 
 
@@ -28,7 +49,8 @@ def http_json(path):
 
 def page_target():
     for target in http_json("/json/list"):
-        if target.get("type") == "page" and "fh_api" not in target.get("url", ""):
+        if target.get("type") == "page" and "192.168.8.1" in target.get("url", "") \
+                and "fh_api" not in target.get("url", ""):
             return target
     raise SystemExit("no page target found")
 
