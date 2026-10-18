@@ -6,7 +6,7 @@ import FHCPECore
 /// callbacks so the layout can be rendered (and screenshot-tested) without a session.
 public struct ShellView: View {
     public enum Route: Equatable, Sendable {
-        case connect, main, cellular
+        case connect, main, cellular, about
     }
 
     @Bindable public var model: ShellModel
@@ -54,7 +54,7 @@ public struct ShellView: View {
                     .frame(height: Theme.canvasHeight)
                 BottomGlassTabBar(items: Self.tabItems, selection: tabSelection,
                                   deviceCount: model.data.isLive ? model.data.devices.count : nil,
-                                  unread: model.threads.reduce(0) { $0 + $1.unreadCount })
+                                  unread: model.data.isLive ? model.threads.reduce(0) { $0 + $1.unreadCount } : 0)
                     .padding(.top, Theme.tabBarGap)
                     .padding(.bottom, Theme.tabBarBottomInset)
             }
@@ -75,7 +75,9 @@ public struct ShellView: View {
             model.tab = newValue
             model.smsRoute = .threads
             model.selectedThreadID = nil
-            if model.route == .cellular { model.closeCellular() }
+            if model.route == .cellular || model.route == .about {
+                model.route = model.data.isLive ? .main : .connect
+            }
         })
     }
 
@@ -84,19 +86,35 @@ public struct ShellView: View {
             switch model.route {
             case .connect:
                 EmptyView()
+            case .about:
+                AboutPage(onBack: model.closeAbout)
             case .cellular:
-                CellularDetailPage(data: model.data, cells: model.cells, lockMode: model.lockMode,
+                CellularDetailPage(data: model.data, cells: model.data.isLive ? model.cells : [], lockMode: model.data.isLive ? model.lockMode : .unknown,
                                    lockBusy: model.lockBusy, onBack: model.closeCellular,
                                    onRefreshCells: model.refreshCells, onLockCurrent: model.applyLock,
-                                   initialTab: model.cellularTab)
+                                   initialTab: model.cellularTab,
+                                   lockState: model.data.isLive ? model.radioLocks : nil,
+                                   onSetCellLockEnabled: model.setCellLockEnabled,
+                                   onSetBandLockEnabled: model.setBandLockEnabled,
+                                   onAddLockedCell: model.addLockedCell,
+                                   onUpdateLockedCell: model.updateLockedCell,
+                                   onDeleteLockedCell: model.deleteLockedCell,
+                                   onDisableLocks: model.disableLocks)
+                    .overlay(alignment: .bottom) {
+                        if let status = model.lockStatus {
+                            StatusBanner(text: status, tone: model.lockStatusIsError ? .error : .success)
+                                .padding(.horizontal, Theme.contentPadding)
+                                .padding(.bottom, 6)
+                        }
+                    }
             case .main:
                 switch model.tab {
                 case 1:
                     DevicesPage(devices: model.devices, isLive: model.data.isLive,
                                 query: $model.searchQuery, filter: $model.accessFilter,
-                                onReload: model.refreshNow)
+                                onReload: model.refreshNow, onReserveIP: model.reserveIP)
                 case 2:
-                    ControlsPage(settings: model.settings,
+                    ControlsPage(settings: model.data.isLive ? model.settings : nil,
                                  busy: model.settingsBusy, status: model.settingsStatus,
                                  statusIsError: model.settingsStatusIsError,
                                  onToggleSSID: model.toggleSSID,
@@ -111,7 +129,7 @@ public struct ShellView: View {
                             selectedThread: model.threads.first { $0.id == model.selectedThreadID },
                             busy: model.smsBusy, status: model.smsStatus,
                             statusIsError: model.smsStatusIsError,
-                            lastSync: model.smsLastSync,
+                            lastSync: model.smsLastSync, isLive: model.data.isLive,
                             draftNumber: $model.draftNumber, draftBody: $model.draftBody,
                             replyBody: $model.replyBody,
                             onReload: model.reloadMessages, onSend: model.sendSMS,
@@ -157,11 +175,16 @@ public struct ShellView: View {
 @MainActor @Observable public final class ShellModel {
     public var route: ShellView.Route
     public var tab: Int
-    public var data: PageData
+    public var data: PageData {
+        didSet { if !data.isLive { clearVolatilePages() } }
+    }
     public var devices: [ConnectedDevice]
     public var cells: [CellRecord]
     public var lockMode: LockMode
     public var lockBusy = false
+    public var radioLocks: RadioLockState?
+    public var lockStatus: String?
+    public var lockStatusIsError = false
     /// Which segment the cellular page opens on (renderer/test seam).
     public var cellularTab = 0
     public var busy = false
@@ -203,6 +226,14 @@ public struct ShellView: View {
     public var connect: () -> Void = {}
     public var openCellular: () -> Void = {}
     public var closeCellular: () -> Void = {}
+    public var closeAbout: () -> Void = {}
+    public var setCellLockEnabled: (Bool) -> Void = { _ in }
+    public var setBandLockEnabled: (Bool, [Int], [Int]) -> Void = { _, _, _ in }
+    public var addLockedCell: (LockedCell) -> Void = { _ in }
+    public var updateLockedCell: (LockedCell) -> Void = { _ in }
+    public var deleteLockedCell: (LockedCell) -> Void = { _ in }
+    public var disableLocks: () -> Void = {}
+    public var reserveIP: (@MainActor (ConnectedDevice, String) async throws -> Void)?
     public var refreshCells: () -> Void = {}
     public var applyLock: (CellRecord?) -> Void = { _ in }
     public var reloadMessages: () -> Void = {}
@@ -235,5 +266,18 @@ public struct ShellView: View {
         self.cells = cells; self.lockMode = lockMode
         self.draftAddress = address; self.draftUsername = username; self.draftPassword = password
         self.menuBarStyle = menuBarStyle
+        if !data.isLive { clearVolatilePages() }
+    }
+
+    /// Device-derived values and SMS drafts belong to one live connection, in memory.
+    /// Reset every page together so no navigation path can expose an old reading.
+    private func clearVolatilePages() {
+        devices = []; cells = []; settings = nil; radioLocks = nil; lockMode = .unknown
+        threads = []; selectedThreadID = nil; smsRoute = .threads; smsLastSync = nil
+        draftNumber = ""; draftBody = ""; replyBody = ""
+        smsBusy = false; settingsBusy = false; lockBusy = false; uplinkSwitchTarget = nil
+        smsStatus = nil; smsStatusIsError = false
+        settingsStatus = nil; settingsStatusIsError = false
+        lockStatus = nil; lockStatusIsError = false
     }
 }

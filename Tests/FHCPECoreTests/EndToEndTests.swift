@@ -10,6 +10,16 @@ import Foundation
 /// parsing shows up here instead of on the user's network.
 @Suite(.serialized)
 struct EndToEndTests {
+    @Test func displacedLoginRequiresAuthenticationForSnapshotAndSMS() async throws {
+        try await withServer { server, port in
+            let session = DeviceSession(address: try DeviceAddress("http://127.0.0.1:\(port)"))
+            _ = try await session.connect(username: "admin", password: "test-password")
+            server.expireSession()
+            await #expect(throws: CPEError.authentication) { _ = try await session.refresh() }
+            await #expect(throws: CPEError.authentication) { _ = try await session.threads() }
+            await session.close()
+        }
+    }
     private func withServer<T>(_ body: (FakeCPE, UInt16) async throws -> T) async throws -> T {
         let server = try FakeCPE()
         let port = try server.start()

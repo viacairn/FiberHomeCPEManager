@@ -15,6 +15,7 @@ public struct SMSPage: View {
     public let status: String?
     public let statusIsError: Bool
     public let lastSync: Date?
+    public let isLive: Bool
     @Binding public var draftNumber: String
     @Binding public var draftBody: String
     /// Text of the inline IM input bar in the conversation window.
@@ -29,7 +30,7 @@ public struct SMSPage: View {
 
     public init(threads: [SMSThread], route: Route, selectedThread: SMSThread?,
                 busy: Bool, status: String?, statusIsError: Bool = false,
-                lastSync: Date? = nil,
+                lastSync: Date? = nil, isLive: Bool = true,
                 draftNumber: Binding<String>, draftBody: Binding<String>,
                 replyBody: Binding<String>,
                 onReload: @escaping () -> Void, onSend: @escaping () -> Void,
@@ -38,7 +39,7 @@ public struct SMSPage: View {
                 onSendReply: @escaping (SMSThread, String) -> Void) {
         self.threads = threads; self.route = route; self.selectedThread = selectedThread
         self.busy = busy; self.status = status; self.statusIsError = statusIsError
-        self.lastSync = lastSync
+        self.lastSync = lastSync; self.isLive = isLive
         self._draftNumber = draftNumber; self._draftBody = draftBody
         self._replyBody = replyBody
         self.onReload = onReload; self.onSend = onSend
@@ -49,6 +50,7 @@ public struct SMSPage: View {
 
     /// Resolves either the explicitly selected thread or an existing thread matching the typed recipient number.
     private var activeThread: SMSThread? {
+        guard isLive else { return nil }
         if let selectedThread { return selectedThread }
         let trimmed = draftNumber.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
@@ -57,12 +59,40 @@ public struct SMSPage: View {
 
     public var body: some View {
         VStack(spacing: 0) {
-            switch route {
-            case .threads:
-                threadList
-            case .thread, .compose:
-                imWindow
+            if isLive {
+                switch route {
+                case .threads:
+                    threadList
+                case .thread, .compose:
+                    imWindow
+                }
+            } else {
+                disconnectedState
             }
+        }
+    }
+
+    private var disconnectedState: some View {
+        VStack(spacing: 0) {
+            PanelHeading("短信会话")
+                .padding(.horizontal, Theme.contentPadding)
+                .padding(.bottom, Theme.Space.s)
+            VStack(spacing: Theme.Space.s) {
+                Spacer(minLength: 0)
+                Image(systemName: "wifi.slash")
+                    .font(.system(size: 22, weight: .light))
+                    .foregroundStyle(Theme.inkMuted)
+                Text("设备已断开连接")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(Theme.inkSecondary)
+                Text("连接设备后可读取和发送短信")
+                    .font(Theme.footnote)
+                    .foregroundStyle(Theme.inkMuted)
+                    .multilineTextAlignment(.center)
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, Theme.contentPadding)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
 
@@ -154,6 +184,7 @@ public struct SMSPage: View {
 
     private func threadRow(_ thread: SMSThread) -> some View {
         Button {
+            guard isLive else { return }
             onSelect(thread)
             onMarkRead(thread)
         } label: {
@@ -376,7 +407,7 @@ public struct SMSPage: View {
         )
         let currentText = textBinding.wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines)
         let targetPhone = (selectedThread?.phone ?? draftNumber).trimmingCharacters(in: .whitespacesAndNewlines)
-        let canSend = !busy && !currentText.isEmpty && !targetPhone.isEmpty
+        let canSend = isLive && !busy && !currentText.isEmpty && !targetPhone.isEmpty
         let placeholder = targetPhone.isEmpty ? "输入短信内容…" : "发送给 \(targetPhone)…"
 
         return VStack(spacing: 5) {
@@ -418,6 +449,7 @@ public struct SMSPage: View {
     }
 
     private func submitIMMessage() {
+        guard isLive, !busy else { return }
         let body = (selectedThread != nil ? replyBody : (draftBody.isEmpty ? replyBody : draftBody))
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !body.isEmpty else { return }

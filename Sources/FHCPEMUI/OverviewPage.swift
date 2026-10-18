@@ -99,10 +99,12 @@ public struct OverviewPage: View {
     }
 
     private var heroTitle: String {
-        if data.isLive && !data.hasCellularSignal && data.ethernetConnected {
+        guard data.isLive else { return "—" }
+        if !data.hasCellularSignal && data.ethernetConnected {
             return "以太网宽带"
         }
-        return CarrierMapper.displayName(for: data.radio.plmn ?? data.snapshot?.plmn)
+        guard let carrierPLMN else { return "—" }
+        return CarrierMapper.displayName(for: carrierPLMN)
     }
 
     private var carrierPLMN: String? {
@@ -164,7 +166,8 @@ public struct OverviewPage: View {
 
     /// Both uplinks are stated: each WAN reports its own `ConnectionStatus`.
     private var heroStatus: (text: String, tone: StatusDot.Tone, tint: Color) {
-        switch (data.cellularConnected, data.ethernetConnected) {
+        guard data.isLive else { return ("设备未连接", .neutral, Theme.inkMuted) }
+        return switch (data.cellularConnected, data.ethernetConnected) {
         case (true, true): ("已注册 · 双网在线", .positive, Theme.positive)
         case (true, false): ("已注册 · 蜂窝在线", .positive, Theme.positive)
         case (false, true): ("以太网在线", .positive, Theme.positive)
@@ -256,8 +259,9 @@ public struct OverviewPage: View {
         VStack(spacing: 5) {
             HStack(spacing: 6) {
                 PanelHeading("蜂窝信息")
-                let aggregated = (data.snapshot?.carrierCount ?? 1) > 1
-                Text(data.snapshot?.carrierAggregationLabel ?? "单载波 PCC")
+                let carrierCount = data.snapshot?.carrierCount
+                let aggregated = (carrierCount ?? 0) > 1
+                Text(carrierCount == nil ? "—" : (data.snapshot?.carrierAggregationLabel ?? "—"))
                     .font(.system(size: 9.5, weight: .bold))
                     .foregroundStyle(aggregated ? AnyShapeStyle(Color.accentColor)
                                                 : AnyShapeStyle(Theme.inkSecondary))
@@ -312,15 +316,15 @@ public struct OverviewPage: View {
     // MARK: Formatting
 
     private func rate(_ bits: Double?) -> String? {
-        guard data.isLive else { return "0" }
-        return MetricFormatter.bitRate(bits)?.value ?? "0"
+        guard data.isLive else { return nil }
+        return MetricFormatter.bitRate(bits)?.value
     }
     private func rateUnit(_ bits: Double?) -> String? {
-        guard data.isLive else { return "Kbps" }
-        return MetricFormatter.bitRate(bits)?.unit ?? "Kbps"
+        guard data.isLive else { return nil }
+        return MetricFormatter.bitRate(bits)?.unit
     }
     private func rateAccessibility(_ bits: Double?) -> String {
-        guard data.isLive, let value = MetricFormatter.bitRate(bits) else { return "0 Kbps" }
+        guard data.isLive, let value = MetricFormatter.bitRate(bits) else { return "无数据" }
         return "\(value.value) \(value.unit)"
     }
 
@@ -345,7 +349,7 @@ public struct OverviewPage: View {
         return MetricFormatter.bytes(bytes)?.value
     }
     private func trafficUnit(_ bytes: Double?) -> String? {
-        guard data.isLive else { return "GB" }
+        guard data.isLive else { return nil }
         return MetricFormatter.bytes(bytes)?.unit
     }
     private func trafficAccessibility(_ bytes: Double?) -> String {
@@ -360,16 +364,25 @@ public struct OverviewPage: View {
 /// of optional-chaining noise. `snapshot == nil` means "no live evidence": every value
 /// renders as "—" rather than a fabricated zero.
 public struct PageData: Sendable, Equatable {
-    public var snapshot: DeviceSnapshot?
-    public var devices: [ConnectedDevice]
+    private var rawSnapshot: DeviceSnapshot?
+    /// A retained or late reading is never presented without a live session.
+    public var snapshot: DeviceSnapshot? {
+        get { isLive ? rawSnapshot : nil }
+        set { rawSnapshot = newValue }
+    }
+    private var rawDevices: [ConnectedDevice]
+    public var devices: [ConnectedDevice] {
+        get { isLive ? rawDevices : [] }
+        set { rawDevices = newValue }
+    }
     public var stale: Bool
     public var connected: Bool
 
     public init(snapshot: DeviceSnapshot?, devices: [ConnectedDevice] = [], stale: Bool = false, connected: Bool = false) {
-        self.snapshot = snapshot; self.devices = devices; self.stale = stale; self.connected = connected
+        self.rawSnapshot = snapshot; self.rawDevices = devices; self.stale = stale; self.connected = connected
     }
 
-    public var isLive: Bool { connected && !stale && snapshot != nil }
+    public var isLive: Bool { connected && !stale && rawSnapshot != nil }
     public var model: String {
         guard let snapshot, !snapshot.model.isEmpty else { return "待连接" }
         return snapshot.model

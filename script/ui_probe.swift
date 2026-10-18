@@ -172,6 +172,41 @@ func closePopover() {
     usleep(700_000)
 }
 
+func pageHasText(_ text: String) -> Bool {
+    guard let root = popoverRoot() else { return false }
+    return descendants(root).contains {
+        attribute($0, kAXValueAttribute).contains(text) || attribute($0, kAXDescriptionAttribute).contains(text)
+    }
+}
+
+@discardableResult
+func chooseStatusMenuItem(_ title: String) -> Bool {
+    resetUI(); closePopover()
+    guard let item = statusItemElement() else { return false }
+    let origin = pointOf(item), size = sizeOf(item)
+    let position = CGPoint(x: origin.x + size.width / 2, y: origin.y + size.height / 2)
+    click(at: position, right: true)
+    var wanted: AXUIElement?
+    _ = waitFor {
+        var element: AXUIElement?
+        AXUIElementCopyElementAtPosition(AXUIElementCreateSystemWide(), Float(position.x), Float(position.y + 50), &element)
+        var node = element
+        for _ in 0..<8 {
+            guard let current = node else { return false }
+            if attribute(current, kAXRoleAttribute) == "AXMenu" {
+                wanted = childrenOf(current).first { attribute($0, kAXTitleAttribute) == title }
+                return wanted != nil
+            }
+            var parent: CFTypeRef?
+            AXUIElementCopyAttributeValue(current, kAXParentAttribute as CFString, &parent)
+            node = parent.flatMap { CFGetTypeID($0) == AXUIElementGetTypeID() ? unsafeBitCast($0, to: AXUIElement.self) : nil }
+        }
+        return false
+    }
+    guard let wanted else { return false }
+    return AXUIElementPerformAction(wanted, kAXPressAction as CFString) == .success
+}
+
 func inventory(_ label: String) {
     guard let root = popoverRoot() else { print("  [\(label)] no popover"); return }
     let all = descendants(root)
@@ -308,6 +343,24 @@ case "tabs":
         inventory(expected.0)
     }
 
+case "about":
+    check("关于菜单可打开页面", chooseStatusMenuItem("关于 FiberHome CPE Manager"))
+    check("关于显示产品与支持型号", waitFor { pageHasText("支持 LG6851F / RP0112") && pageHasText("FiberHome CPE Manager") })
+    check("关于显示内存与钥匙串说明", pageHasText("仅保存在内存") && pageHasText("系统钥匙串"))
+    activateApp(); pressKey(53)
+    check("Esc 返回之前页面", waitFor { !pageHasText("支持 LG6851F / RP0112") && popoverRoot() != nil })
+
+case "relogin":
+    check("重新登录菜单可执行", chooseStatusMenuItem("重新登录"))
+    check("重新登录恢复实时概览", waitFor(12) { pageHasText("蜂窝信息") })
+
+case "session-expired":
+    openPopover()
+    check("失效会话返回登录页", waitFor(12) { pageHasText("登录已失效") })
+    check("登录页不显示旧短信和蜂窝信息", !pageHasText("短信会话") && !pageHasText("蜂窝信息"))
+    check("失效后可显式重新登录", chooseStatusMenuItem("重新登录"))
+    check("重新登录恢复实时概览", waitFor(12) { pageHasText("蜂窝信息") })
+
 case "contextmenu":
     resetUI()
     closePopover()
@@ -331,7 +384,9 @@ case "contextmenu":
         node = parent.flatMap { CFGetTypeID($0) == AXUIElementGetTypeID() ? unsafeBitCast($0, to: AXUIElement.self) : nil }
     }
     print("  menu: \(titles)")
-    check("右键菜单含退出", titles.contains("退出 FiberHomeCPEManager"))
+    check("右键菜单含退出应用", titles.contains("退出应用"))
+    check("右键菜单含重新登录", titles.contains("重新登录"))
+    check("右键菜单含关于", titles.contains("关于 FiberHome CPE Manager"))
     check("右键菜单含网速勾选项", titles.contains("显示网速"))
     check("右键菜单不含打开面板", !titles.contains("打开面板"))
     check("右键菜单不含立即刷新", !titles.contains("立即刷新"))
@@ -468,7 +523,7 @@ case "power":
         guard let current = node else { break }
         if attribute(current, kAXRoleAttribute) == "AXMenu" {
             quitItem = childrenOf(current).first {
-                attribute($0, kAXTitleAttribute) == "退出 FiberHomeCPEManager"
+                attribute($0, kAXTitleAttribute) == "退出应用"
             }
             break
         }

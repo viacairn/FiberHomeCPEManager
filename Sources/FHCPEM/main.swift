@@ -188,7 +188,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let appMenu = NSMenu(title: "FiberHomeCPEManager")
         appMenuItem.submenu = appMenu
 
-        let quit = NSMenuItem(title: "退出 FiberHomeCPEManager",
+        let quit = NSMenuItem(title: "退出应用",
                               action: #selector(NSApplication.terminate(_:)),
                               keyEquivalent: "q")
         quit.target = NSApp
@@ -273,6 +273,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Returns `true` when a drill-in page was closed, so Esc does not also hide the panel.
     private func goBackIfPossible() -> Bool {
         guard let model = store?.model else { return false }
+        if model.route == .about { model.closeAbout(); return true }
         if model.route == .cellular {
             model.closeCellular()
             return true
@@ -291,7 +292,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         model.tab = index
         model.smsRoute = .threads
         model.selectedThreadID = nil
-        if model.route == .cellular { model.closeCellular() }
+        if model.route == .cellular || model.route == .about {
+            model.route = model.data.isLive ? .main : .connect
+        }
     }
 
     @objc private func statusItemClicked(_ sender: NSStatusBarButton) {
@@ -345,6 +348,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         header.isEnabled = false
         menu.addItem(header)
         menu.addItem(.separator())
+        let relogin = NSMenuItem(title: "重新登录", action: #selector(relogin), keyEquivalent: "")
+        relogin.target = self
+        relogin.isEnabled = !store.model.busy
+        menu.addItem(relogin)
 
         // A single manual opt-in: the icon shows signal strength by default.
         let rate = NSMenuItem(title: "显示网速",
@@ -361,7 +368,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         forget.target = self
         menu.addItem(forget)
 
-        let quit = NSMenuItem(title: "退出 FiberHomeCPEManager", action: #selector(quit), keyEquivalent: "q")
+        let about = NSMenuItem(title: "关于 FiberHome CPE Manager", action: #selector(showAbout), keyEquivalent: "")
+        about.target = self
+        menu.addItem(about)
+        menu.addItem(.separator())
+        let quit = NSMenuItem(title: "退出应用", action: #selector(quit), keyEquivalent: "q")
         quit.target = self
         menu.addItem(quit)
 
@@ -380,6 +391,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func forgetCredential() {
         store?.forgetCredential()
+    }
+
+    @objc private func relogin() {
+        store?.relogin()
+        showPanel()
+    }
+
+    @objc private func showAbout() {
+        store?.openAbout()
+        showPanel()
+    }
+
+    private func showPanel() {
+        guard let popover, let button = statusItem?.button else { return }
+        if !popover.isShown { popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY) }
+        popoverOpenedAt = Date()
+        popover.contentViewController?.view.window?.makeKey()
+        NSApp.activate(ignoringOtherApps: true)
     }
 
     @objc private func quit() {
@@ -401,6 +430,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var visibleObservers = 0
     private var currentCredentials: Credentials?
     private var activeSessionID: UUID?
+    /// Invalidated on every outage as well as reconnect. Late secondary reads cannot
+    /// repopulate a page after its live data has been erased.
+    private var dataEpoch = UUID()
+    private var uplinkOperationID: UUID?
+    private var aboutReturnRoute: ShellView.Route = .connect
+    private var radioReadInFlight = false
+    private var radioReadGeneration = 0
     /// Settings are a *separate* data source from the 1 Hz traffic sample. Background reads
     /// never toggle the switches or replace an equal value; only a user write sets
     /// settingsBusy. This is what stopped the control page from flickering every second.
@@ -439,8 +475,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         model.detectGateway = { [weak self] in
             self?.model.draftAddress = GatewayDetector.defaultGateway() ?? "192.168.8.1"
         }
-        model.openCellular = { [weak self] in self?.model.route = .cellular }
+        model.openCellular = { [weak self] in
+            self?.model.route = .cellular
+            self?.reloadRadioLocks()
+        }
         model.closeCellular = { [weak self] in self?.model.route = .main }
+        model.closeAbout = { [weak self] in
+            guard let self else { return }
+            self.model.route = self.aboutReturnRoute == .connect && self.model.data.isLive ? .main : self.aboutReturnRoute
+        }
+        model.setCellLockEnabled = { [weak self] enabled in
+            self?.mutateRadioLocks("已\(enabled ? "开启小区锁定" : "关闭小区锁定")") { try await $0.setCellLockEnabled(enabled) }
+        }
+        model.setBandLockEnabled = { [weak self] enabled, lte, nr in
+            self?.mutateRadioLocks("已\(enabled ? "开启频段锁定" : "关闭频段锁定")") { try await $0.setBandLockEnabled(enabled, lte: lte, nr: nr) }
+        }
+        model.addLockedCell = { [weak self] cell in
+            self?.mutateRadioLocks("已添加候选小区") { try await $0.addLockedCell(cell) }
+        }
+        model.updateLockedCell = { [weak self] cell in
+            self?.mutateRadioLocks("已更新候选小区") { try await $0.updateLockedCell(cell) }
+        }
+        model.deleteLockedCell = { [weak self] cell in
+            self?.mutateRadioLocks("已删除候选小区") { try await $0.deleteLockedCell(cell) }
+        }
+        model.disableLocks = { [weak self] in
+            self?.mutateRadioLocks("已关闭全部锁定") { try await $0.disableRadioLocks() }
+        }
+        model.reserveIP = { [weak self] device, ip in
+            guard let self else { throw CancellationError() }
+            try await self.reserveIP(for: device, ip: ip)
+        }
         model.quit = { NSApp.terminate(nil) }
         model.reloadMessages = { [weak self] in self?.reloadMessages() }
         model.refreshCells = { [weak self] in self?.refreshCells() }
@@ -504,6 +569,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     // MARK: Connection
+
+    func openAbout() {
+        if model.route != .about { aboutReturnRoute = model.route }
+        model.route = .about
+    }
+
+    /// Reauthentication is a user action: never start a background login contest with WebUI.
+    func relogin() {
+        guard !model.busy else { return }
+        let credential = currentCredentials
+        disconnectSession(preservingDraft: true)
+        model.route = .connect
+        model.connectError = nil
+        if let credential {
+            model.draftAddress = (try? DeviceAddress(credential.address))?.hostText ?? credential.address
+            model.draftUsername = credential.username
+            model.draftPassword = credential.password
+        } else {
+            loadSavedCredentialIfAny()
+        }
+        if !model.draftPassword.isEmpty { connect() }
+    }
 
     /// True once this process has asked for the stored credential.
     private var didAttemptKeychainLoad = false
@@ -587,6 +674,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let credentials = Credentials(address: address.url.absoluteString, username: username, password: password)
         disconnectSession(preservingDraft: true)
+        currentCredentials = nil
         let id = UUID(); generation = id
         model.busy = true
         model.connectError = nil
@@ -619,6 +707,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // so the SMS tab is populated before the user opens it.
                 self.reloadMessages()
                 self.reloadSettings()
+                self.reloadRadioLocks()
                 WidgetCenter.shared.reloadAllTimelines()
             } catch {
                 guard self.generation == id else { return }
@@ -633,6 +722,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.model.connectError = error.localizedDescription
                     + (clearPassword ? " 密码已清空，请重新输入。" : "")
                 self.publishWidget(WidgetSnapshot.disconnected)
+                self.session = nil
+                self.activeSessionID = nil
+                self.model.route = .connect
+                self.onStatusItemNeedsUpdate?()
                 await next.close()
             }
         }
@@ -641,7 +734,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Switches the uplink mode, surviving the LAN drop that a WAN change can cause.
     func switchUplink(_ target: UplinkTarget) {
         guard target.isSupported, !model.settingsBusy else { return }
-        guard let session, let credentials = currentCredentials else { return }
+        guard let session, let id = activeSessionID, let credentials = currentCredentials, model.data.isLive else { return }
+        let epoch = dataEpoch
+        let operationID = UUID()
+        uplinkOperationID = operationID
+        refreshTask?.cancel(); refreshTask = nil
         model.settingsBusy = true
         model.uplinkSwitchTarget = target
         model.settingsStatus = "正在切换到\(target.title)…"
@@ -649,22 +746,56 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         Task { [weak self] in
             guard let self else { return }
+            defer {
+                if self.uplinkOperationID == operationID {
+                    self.uplinkOperationID = nil
+                    self.model.settingsBusy = false; self.model.uplinkSwitchTarget = nil
+                    self.startRefresh(fast: self.visibleObservers > 0)
+                }
+            }
             do {
                 let applied = try await session.setUplink(target)
-                self.model.settings = try await session.readSettings()
+                let settings = try await session.readSettings()
+                guard self.generation == id, self.activeSessionID == id,
+                      self.uplinkOperationID == operationID else { return }
+                if self.dataEpoch != epoch || !self.model.data.isLive {
+                    let reading = try await session.refresh()
+                    guard self.generation == id, self.activeSessionID == id else { return }
+                    self.apply(reading)
+                    self.stale = false
+                    self.reloadMessages(quiet: true); self.reloadRadioLocks()
+                }
+                self.model.settings = settings
                 self.model.settingsBusy = false
                 self.model.uplinkSwitchTarget = nil
                 self.model.settingsStatus = applied ? "已切换到\(target.title)" : "设备未确认切换结果"
                 self.model.settingsStatusIsError = !applied
             } catch {
+                guard self.generation == id, self.activeSessionID == id,
+                      self.uplinkOperationID == operationID else { return }
+                if error as? CPEError == .authentication {
+                    self.handleSessionFailure(error, id: id, epoch: self.dataEpoch)
+                    return
+                }
+                guard error is URLError else {
+                    self.model.settingsBusy = false; self.model.uplinkSwitchTarget = nil
+                    self.model.settingsStatus = "切换失败：\(error.localizedDescription)"
+                    self.model.settingsStatusIsError = true
+                    self.reloadSettings(quiet: true)
+                    return
+                }
                 // A WAN change can take the LAN/Wi-Fi path down for a few seconds, which
                 // kills this session; reconnect before deciding the switch failed.
+                self.invalidateDeviceData()
+                self.model.settingsBusy = true; self.model.uplinkSwitchTarget = target
                 self.model.settingsStatus = "切换中连接中断，正在重连…"
-                let recovered = await self.reconnect(using: credentials)
+                let recoveredID = await self.reconnect(using: credentials, replacing: id)
+                guard (recoveredID != nil && self.activeSessionID == recoveredID)
+                    || (recoveredID == nil && self.activeSessionID == id) else { return }
                 self.model.settingsBusy = false
                 self.model.uplinkSwitchTarget = nil
-                if recovered {
-                    self.model.settingsStatus = "已切换到\(target.title)"
+                if recoveredID != nil {
+                    self.model.settingsStatus = "连接已恢复，请确认上行模式"
                     self.model.settingsStatusIsError = false
                 } else {
                     self.model.settingsStatus = "切换后无法连接设备：\(error.localizedDescription)"
@@ -675,32 +806,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// Retries the session a few times after an uplink switch.
-    private func reconnect(using credentials: Credentials) async -> Bool {
-        guard let address = try? DeviceAddress(credentials.address) else { return false }
+    private func reconnect(using credentials: Credentials, replacing originalID: UUID) async -> UUID? {
+        guard let address = try? DeviceAddress(credentials.address) else { return nil }
         for _ in 0..<6 {
+            guard generation == originalID, activeSessionID == originalID, !Task.isCancelled else { return nil }
             try? await Task.sleep(for: .seconds(2))
+            guard generation == originalID, activeSessionID == originalID, !Task.isCancelled else { return nil }
             let fresh = DeviceSession(address: address)
             do {
                 let reading = try await fresh.connect(username: credentials.username,
                                                       password: credentials.password)
+                guard generation == originalID, activeSessionID == originalID else { await fresh.close(); return nil }
+                refreshTask?.cancel()
                 await session?.close()
                 session = fresh
                 let newID = UUID()
                 activeSessionID = newID
                 generation = newID
+                dataEpoch = UUID()
                 apply(reading)
                 model.data.connected = true
                 model.route = .main
-                model.settings = (try? await fresh.readSettings()) ?? model.settings
+                stale = false
+                reloadSettings()
+                reloadRadioLocks()
                 reloadMessages()
+                startRefresh(fast: visibleObservers > 0)
                 onStatusItemNeedsUpdate?()
-                return true
+                return newID
             } catch {
                 await fresh.close()
+                if Self.isCredentialFailure(error) { break }
+                if case CPEError.loginRejected = error { break }
                 continue
             }
         }
-        return false
+        return nil
     }
 
 
@@ -712,11 +853,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func persistCredential(_ credentials: Credentials) {
         // The login page's checkbox is the source of truth for this connection; the stored
         // preference is only the initial state of that checkbox.
-        let wantsPersistence = model.savePassword || preferences.rememberConnection
+        let wasRemembering = preferences.rememberConnection
+        let wantsPersistence = model.savePassword
         preferences.rememberConnection = wantsPersistence
         guard wantsPersistence else {
             // Unchecking is an explicit "forget me": remove any previous item.
-            try? keychain.delete()
+            if wasRemembering { try? keychain.delete() }
             return
         }
         do {
@@ -735,9 +877,51 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let previous = session
         session = nil
         activeSessionID = nil
+        uplinkOperationID = nil
         model.busy = false
+        invalidateDeviceData()
         if !preservingDraft { model.draftPassword = "" }
         if let previous { Task { await previous.close() } }
+    }
+
+    private func isCurrent(_ id: UUID, epoch: UUID) -> Bool {
+        generation == id && activeSessionID == id && dataEpoch == epoch && !Task.isCancelled
+    }
+
+    private func invalidateDeviceData() {
+        dataEpoch = UUID()
+        model.data = PageData(snapshot: nil)
+        model.lanAddress = ""
+        settingsGeneration += 1
+        radioReadGeneration += 1
+        settingsReadInFlight = false; smsQuietReadInFlight = false; radioReadInFlight = false
+        reservationInFlight = false
+        lastSettingsReadAt = .distantPast; lastSMSReadAt = .distantPast
+        stale = true
+        publishWidget(.disconnected)
+        onStatusItemNeedsUpdate?()
+    }
+
+    /// Returns true when the caller must stop publishing its result/banner.
+    @discardableResult
+    private func handleSessionFailure(_ error: Error, id: UUID, epoch: UUID, primaryRead: Bool = false) -> Bool {
+        guard isCurrent(id, epoch: epoch) else { return true }
+        if error is CancellationError || (error as? URLError)?.code == .cancelled { return true }
+        if let cpe = error as? CPEError, cpe == .busy { return true }
+        if error as? CPEError == .authentication {
+            disconnectSession(preservingDraft: true)
+            model.route = .connect
+            model.connectError = "登录已失效，可能已在其他入口登录。请重新登录。"
+            model.statusMessage = nil
+            return true
+        }
+        if primaryRead || error is URLError {
+            invalidateDeviceData()
+            model.statusMessage = "连接已断开，请检查设备连接或重新登录。"
+            if let session { Task { await session.resetTrafficBaseline() } }
+            return true
+        }
+        return false
     }
 
     // MARK: Refresh
@@ -766,17 +950,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// They are never read at 1 Hz, and a background read never sets settingsBusy, so the
     /// switches no longer dim/flicker in time with the traffic refresh.
     func refreshOnce(includeSettings: Bool = false) async {
-        guard let session, let id = activeSessionID, !model.busy else { return }
+        guard let session, let id = activeSessionID, !model.busy, uplinkOperationID == nil else { return }
+        let epoch = dataEpoch
+        let wasLive = model.data.isLive
         let previousSMSCount = model.data.snapshot?.smsCount
         do {
             let reading = try await session.refresh()
-            guard generation == id else { return }
+            guard isCurrent(id, epoch: epoch) else { return }
             apply(reading)
             stale = false
             model.data.connected = true
             publishWidget(WidgetSnapshot(snapshot: reading.snapshot, stale: false))
             let controlsVisible = model.route == .main && model.tab == 2
-            let settingsDue = includeSettings
+            let settingsDue = !wasLive || includeSettings
                 || (controlsVisible
                     && Date().timeIntervalSince(lastSettingsReadAt) >= Self.settingsRefreshInterval)
             if settingsDue {
@@ -786,26 +972,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // AND immediately whenever the device's reported `smsCount` changes.
             let smsVisible = model.route == .main && model.tab == 3
             let smsCountChanged = reading.snapshot.smsCount != previousSMSCount
-            if smsCountChanged || (smsVisible && SMSRefreshPolicy.isDue(lastRead: lastSMSReadAt)) {
+            if !wasLive || smsCountChanged || (smsVisible && SMSRefreshPolicy.isDue(lastRead: lastSMSReadAt)) {
                 reloadMessages(quiet: true)
             }
+            if !wasLive || (includeSettings && model.route == .cellular) { reloadRadioLocks() }
         } catch CPEError.busy {
             return
         } catch {
-            guard generation == id else { return }
-            stale = true
-            model.data.stale = true
-            if case CPEError.authentication = error {
-                // Stop the loop and require an explicit reconnect; never replay writes.
-                model.data.connected = false
-                model.connectError = "登录已失效（可能已在网页端登录），请重新连接"
-                model.smsStatus = "会话已失效（网页端登录会挤掉当前连接），请重新登录以同步短信"
-                model.smsStatusIsError = true
-                refreshTask?.cancel()
-                publishWidget(WidgetSnapshot.disconnected)
-            } else {
-                publishWidget(model.data.snapshot.map { WidgetSnapshot(snapshot: $0, stale: true) } ?? .disconnected)
-            }
+            handleSessionFailure(error, id: id, epoch: epoch, primaryRead: true)
         }
     }
 
@@ -818,7 +992,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         model.cells = reading.snapshot.cells.isEmpty
             ? servingOnly(reading.snapshot)
             : reading.snapshot.cells
-        model.lockMode = reading.snapshot.lockMode
+        model.lockMode = model.radioLocks?.mode ?? reading.snapshot.lockMode
+        model.lanAddress = currentCredentials.flatMap { try? DeviceAddress($0.address).hostText } ?? ""
+        model.statusMessage = nil
         onStatusItemNeedsUpdate?()
     }
 
@@ -884,14 +1060,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func refreshCells() {
-        guard let session else { return }
+        guard let session, let id = activeSessionID, model.data.isLive else { return }
+        let epoch = dataEpoch
+        reloadRadioLocks()
         Task {
             do {
                 let cells = try await session.discoverableCells()
-                guard !Task.isCancelled else { return }
+                guard isCurrent(id, epoch: epoch) else { return }
                 model.cells = cells
             } catch {
-                model.statusMessage = "小区读取失败：\(error.localizedDescription)"
+                guard !handleSessionFailure(error, id: id, epoch: epoch) else { return }
+                model.cells = []
+                model.lockStatus = "小区读取失败：\(error.localizedDescription)"
+                model.lockStatusIsError = true
             }
         }
     }
@@ -909,13 +1090,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// local bubbles instead of replacing them, so the just-sent message never disappears
     /// and then reappears ("发送后不同步").
     func reloadMessages(keepStatus: Bool = false, quiet: Bool = false) {
-        guard let session else {
+        guard let session, let id = activeSessionID, model.data.isLive else {
             if !quiet {
                 model.smsStatus = "未连接"
                 model.smsStatusIsError = true
             }
             return
         }
+        let epoch = dataEpoch
         if quiet {
             guard !smsQuietReadInFlight, !model.smsBusy else { return }
             smsQuietReadInFlight = true
@@ -928,31 +1110,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let self else { return }
             do {
                 let threads = try await session.threads()
+                guard self.isCurrent(id, epoch: epoch), self.model.data.isLive else { return }
                 let merged = SMSThreadMerge.merge(threads: threads, keepingLocal: self.model.threads)
                 if self.model.threads != merged { self.model.threads = merged }
                 self.lastSMSReadAt = Date()
                 self.model.smsLastSync = self.lastSMSReadAt
                 if quiet { self.smsQuietReadInFlight = false } else { self.model.smsBusy = false }
             } catch {
+                guard self.isCurrent(id, epoch: epoch) else { return }
                 self.lastSMSReadAt = Date()
-                if quiet {
-                    self.smsQuietReadInFlight = false
-                    if case CPEError.authentication = error {
-                        self.model.smsStatus = "会话已失效（可能已在浏览器登录 WebUI），请重新连接"
-                        self.model.smsStatusIsError = true
-                    } else if self.model.threads.isEmpty {
-                        self.model.smsStatus = "短信同步失败：\(error.localizedDescription)"
-                        self.model.smsStatusIsError = true
-                    }
-                } else {
-                    self.model.smsBusy = false
-                    if case CPEError.authentication = error {
-                        self.model.smsStatus = "会话已失效（可能已在浏览器登录 WebUI），请重新连接"
-                    } else {
-                        self.model.smsStatus = "短信读取失败：\(error.localizedDescription)"
-                    }
-                    self.model.smsStatusIsError = true
-                }
+                if quiet { self.smsQuietReadInFlight = false } else { self.model.smsBusy = false }
+                guard !self.handleSessionFailure(error, id: id, epoch: epoch) else { return }
+                self.model.threads = []; self.model.smsLastSync = nil
+                self.model.selectedThreadID = nil; self.model.smsRoute = .threads
+                self.model.smsStatus = "短信读取失败：\(error.localizedDescription)"
+                self.model.smsStatusIsError = true
             }
         }
     }
@@ -985,12 +1157,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// Marks a conversation's received messages as read on the device.
     func markThreadRead(_ thread: SMSThread) {
-        guard let session else { return }
+        guard let session, let id = activeSessionID, model.data.isLive else { return }
+        let epoch = dataEpoch
         let nodes = thread.messages.filter { !$0.isRead && !$0.isSent }.map { $0.childnode ?? $0.id }
         guard !nodes.isEmpty else { return }
         Task { [weak self] in
-            try? await session.markRead(nodes)
-            guard let self, let index = self.model.threads.firstIndex(where: { $0.id == thread.id }) else { return }
+            guard let self else { return }
+            do { try await session.markRead(nodes) }
+            catch {
+                guard !self.handleSessionFailure(error, id: id, epoch: epoch) else { return }
+                self.model.smsStatus = "未能标记已读：\(error.localizedDescription)"
+                self.model.smsStatusIsError = true
+                return
+            }
+            guard self.isCurrent(id, epoch: epoch), let index = self.model.threads.firstIndex(where: { $0.id == thread.id }) else { return }
             for i in self.model.threads[index].messages.indices
             where !self.model.threads[index].messages[i].isSent
                 && nodes.contains(self.model.threads[index].messages[i].childnode ?? self.model.threads[index].messages[i].id) {
@@ -1005,13 +1185,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     ///   interactive), never clears a user-facing banner, and only reports an error when
     ///   there is no previously-read settings object to keep showing.
     func reloadSettings(quiet: Bool = false) {
-        guard let session else {
+        guard let session, let id = activeSessionID, model.data.isLive else {
             if !quiet {
                 model.settingsStatus = "未连接"
                 model.settingsStatusIsError = true
             }
             return
         }
+        let epoch = dataEpoch
         guard !settingsReadInFlight, !model.settingsBusy else { return }
         settingsReadInFlight = true
         settingsGeneration += 1
@@ -1021,7 +1202,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let self else { return }
             do {
                 let settings = try await session.readSettings()
-                guard generationAtStart == self.settingsGeneration else { return }
+                guard generationAtStart == self.settingsGeneration, self.isCurrent(id, epoch: epoch) else { return }
                 self.settingsReadInFlight = false
                 self.lastSettingsReadAt = Date()
                 // Assigning an equal value would still invalidate the view and can reset a
@@ -1034,13 +1215,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     self.model.settingsStatusIsError = false
                 }
             } catch {
-                guard generationAtStart == self.settingsGeneration else { return }
+                guard generationAtStart == self.settingsGeneration, self.isCurrent(id, epoch: epoch) else { return }
                 self.settingsReadInFlight = false
                 self.lastSettingsReadAt = Date()
-                if !quiet || self.model.settings == nil {
-                    self.model.settingsStatus = "读取设置失败：\(error.localizedDescription)"
-                    self.model.settingsStatusIsError = true
-                }
+                guard !self.handleSessionFailure(error, id: id, epoch: epoch) else { return }
+                self.model.settings = nil
+                self.model.settingsStatus = "读取设置失败：\(error.localizedDescription)"
+                self.model.settingsStatusIsError = true
             }
         }
     }
@@ -1051,7 +1232,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// it for every background read, which is what made every switch dim once a second.
     private func mutateSettings(_ successMessage: String,
                                 _ action: @escaping (DeviceSession) async throws -> Bool) {
-        guard let session else { model.settingsStatus = "未连接"; model.settingsStatusIsError = true; return }
+        guard let session, let id = activeSessionID, model.data.isLive else { model.settingsStatus = "未连接"; model.settingsStatusIsError = true; return }
+        let epoch = dataEpoch
         guard !model.settingsBusy else { return }
         model.settingsBusy = true
         // Invalidate any settings read that started before this write.
@@ -1062,7 +1244,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let self else { return }
             do {
                 let ok = try await action(session)
-                self.model.settings = try await session.readSettings()
+                let settings = try await session.readSettings()
+                guard self.isCurrent(id, epoch: epoch) else { return }
+                self.model.settings = settings
                 self.lastSettingsReadAt = Date()
                 self.model.settingsBusy = false
                 if ok {
@@ -1073,20 +1257,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     self.model.settingsStatusIsError = true
                 }
             } catch {
+                guard self.isCurrent(id, epoch: epoch) else { return }
                 self.model.settingsBusy = false
+                guard !self.handleSessionFailure(error, id: id, epoch: epoch) else { return }
                 self.model.settingsStatus = "操作失败：\(error.localizedDescription)"
                 self.model.settingsStatusIsError = true
                 // Re-read anyway: the switch in the UI moved optimistically, and the device
                 // is the only authority on whether the change actually landed.
-                self.model.settings = try? await session.readSettings()
-                self.lastSettingsReadAt = Date()
+                self.model.settings = nil
+                self.reloadSettings(quiet: true)
             }
         }
     }
 
     /// Sends from the inline reply bar of a conversation.
     func sendReply(to thread: SMSThread, body: String) {
-        guard let session else { model.smsStatus = "未连接"; model.smsStatusIsError = true; return }
+        guard let session, let id = activeSessionID, model.data.isLive else { model.smsStatus = "未连接"; model.smsStatusIsError = true; return }
+        let epoch = dataEpoch
         let text = body.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty, !model.smsBusy else { return }
         model.smsBusy = true
@@ -1095,6 +1282,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let self else { return }
             do {
                 try await session.sendSMS(to: thread.phone, body: text)
+                guard self.isCurrent(id, epoch: epoch) else { return }
                 self.model.smsBusy = false
                 self.model.replyBody = ""
                 self.model.draftBody = ""
@@ -1107,9 +1295,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.model.smsStatusIsError = false
                 self.reloadMessages(keepStatus: true)
                 try? await Task.sleep(for: .milliseconds(1_500))
+                guard self.isCurrent(id, epoch: epoch) else { return }
                 self.reloadMessages(keepStatus: true)
             } catch {
+                guard self.isCurrent(id, epoch: epoch) else { return }
                 self.model.smsBusy = false
+                guard !self.handleSessionFailure(error, id: id, epoch: epoch) else { return }
                 self.model.smsStatus = (error as? CPEError)?.errorDescription ?? error.localizedDescription
                 self.model.smsStatusIsError = true
             }
@@ -1117,7 +1308,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func sendSMS() {
-        guard let session else { model.smsStatus = "未连接"; model.smsStatusIsError = true; return }
+        guard let session, let id = activeSessionID, model.data.isLive else { model.smsStatus = "未连接"; model.smsStatusIsError = true; return }
+        let epoch = dataEpoch
         let number = model.draftNumber.trimmingCharacters(in: .whitespacesAndNewlines)
         let body = model.draftBody.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !number.isEmpty, !body.isEmpty else {
@@ -1131,6 +1323,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let self else { return }
             do {
                 try await session.sendSMS(to: number, body: body)
+                guard self.isCurrent(id, epoch: epoch) else { return }
                 self.model.smsBusy = false
                 self.model.draftBody = ""
                 self.model.replyBody = ""
@@ -1141,10 +1334,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.model.smsStatusIsError = false
                 self.reloadMessages(keepStatus: true)
                 try? await Task.sleep(for: .milliseconds(1_500))
+                guard self.isCurrent(id, epoch: epoch) else { return }
                 self.reloadMessages(keepStatus: true)
             } catch {
+                guard self.isCurrent(id, epoch: epoch) else { return }
                 // The draft is kept so the user can retry or copy it out.
                 self.model.smsBusy = false
+                guard !self.handleSessionFailure(error, id: id, epoch: epoch) else { return }
                 self.model.smsStatus = "发送失败：\(error.localizedDescription)"
                 self.model.smsStatusIsError = true
             }
@@ -1152,17 +1348,92 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applyLock(to cell: CellRecord?) {
-        guard let cell, cell.state == .serving else {
-            model.statusMessage = "缺少服务小区信息，无法锁定"
+        guard let cell, let channel = cell.channel.flatMap(Int.init), let pci = Int(cell.pci),
+              cell.tech == .nr || cell.tech == .lte else {
+            model.lockStatus = "缺少小区频点或 PCI，无法锁定"
+            model.lockStatusIsError = true
             return
         }
-        // Locking writes are intentionally not sent: the firmware acknowledgement path is
-        // unverified, and a wrong lock can drop the uplink. The UI states this plainly.
+        let candidate = LockedCell(index: 0, act: cell.tech == .nr ? 2 : 1, arfcn: channel, pci: pci)
+        mutateRadioLocks("已开启小区锁定") { session in
+            let current = try await session.readRadioLocks()
+            if !current.cells.contains(where: { $0.arfcn == candidate.arfcn && $0.pci == candidate.pci }) {
+                _ = try await session.addLockedCell(candidate)
+            }
+            return try await session.setCellLockEnabled(true)
+        }
+    }
+
+    private func reloadRadioLocks() {
+        guard let session, let id = activeSessionID, model.data.isLive,
+              !radioReadInFlight, !model.lockBusy else { return }
+        let epoch = dataEpoch
+        radioReadGeneration += 1
+        let readGeneration = radioReadGeneration
+        radioReadInFlight = true
         model.lockBusy = true
         Task {
-            try? await Task.sleep(for: .milliseconds(400))
-            model.lockBusy = false
-            model.statusMessage = "小区锁定接口尚待真机验证，未发送控制请求"
+            do {
+                let locks = try await session.readRadioLocks()
+                guard isCurrent(id, epoch: epoch), readGeneration == radioReadGeneration else { return }
+                radioReadInFlight = false
+                model.lockBusy = false
+                model.radioLocks = locks; model.lockMode = locks.mode
+            } catch {
+                guard isCurrent(id, epoch: epoch), readGeneration == radioReadGeneration else { return }
+                radioReadInFlight = false
+                model.lockBusy = false
+                guard !handleSessionFailure(error, id: id, epoch: epoch) else { return }
+                model.radioLocks = nil; model.lockMode = .unknown
+                model.lockStatus = "锁定配置读取失败：\(error.localizedDescription)"
+                model.lockStatusIsError = true
+            }
+        }
+    }
+
+    private func mutateRadioLocks(_ success: String,
+                                  _ action: @escaping (DeviceSession) async throws -> RadioLockState) {
+        guard let session, let id = activeSessionID, model.data.isLive, !model.lockBusy else { return }
+        let epoch = dataEpoch
+        radioReadGeneration += 1
+        radioReadInFlight = false
+        model.lockBusy = true
+        model.lockStatus = nil; model.lockStatusIsError = false
+        Task {
+            do {
+                let locks = try await action(session)
+                guard isCurrent(id, epoch: epoch) else { return }
+                model.radioLocks = locks; model.lockMode = locks.mode
+                model.lockBusy = false
+                model.lockStatus = success
+            } catch {
+                guard isCurrent(id, epoch: epoch) else { return }
+                model.lockBusy = false
+                guard !handleSessionFailure(error, id: id, epoch: epoch) else { return }
+                model.radioLocks = nil; model.lockMode = .unknown
+                model.lockStatus = "锁定设置失败：\(error.localizedDescription)"
+                model.lockStatusIsError = true
+                reloadRadioLocks()
+            }
+        }
+    }
+
+    private var reservationInFlight = false
+    private func reserveIP(for device: ConnectedDevice, ip: String) async throws {
+        guard let session, let id = activeSessionID, model.data.isLive else {
+            throw CPEError.unsupported("连接已断开，请重新连接后设置。")
+        }
+        guard !reservationInFlight else { throw CPEError.busy }
+        guard let mac = device.mac else { throw DHCPReservationError.invalidMACAddress }
+        let epoch = dataEpoch
+        reservationInFlight = true
+        defer { if isCurrent(id, epoch: epoch) { reservationInFlight = false } }
+        do {
+            try await session.reserveIP(mac: mac, ip: ip)
+            guard isCurrent(id, epoch: epoch) else { throw CancellationError() }
+        } catch {
+            handleSessionFailure(error, id: id, epoch: epoch)
+            throw error
         }
     }
 }

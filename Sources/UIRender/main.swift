@@ -99,6 +99,30 @@ final class Renderer {
         render("14-overview-ethernet-nocard", width: Theme.compactWidth, height: Theme.compactHeight) {
             ShellView(model: fixtures.ethernetNoSim())
         }
+        render("15-about", width: Theme.compactWidth, height: Theme.compactHeight) {
+            let model = fixtures.connected(tab: 0)
+            model.route = .about
+            return ShellView(model: model)
+        }
+        for (number, tab) in [(16, 1), (17, 3)] {
+            render("\(number)-offline-\(tab == 1 ? "devices" : "sms")", width: Theme.compactWidth, height: Theme.compactHeight) {
+                let model = fixtures.connected(tab: tab)
+                model.data.connected = false
+                return ShellView(model: model)
+            }
+        }
+        render("18-offline-cellular", width: Theme.compactWidth, height: Theme.compactHeight) {
+            let model = fixtures.connected(tab: 0)
+            model.route = .cellular
+            model.data.connected = false
+            return ShellView(model: model)
+        }
+        render("19-lock-controls", width: Theme.compactWidth, height: Theme.compactHeight) {
+            let model = fixtures.connected(tab: 0)
+            model.route = .cellular; model.cellularTab = 1
+            model.radioLocks = RadioLockState(cells: [LockedCell(index: 1, act: 2, arfcn: 634464, pci: 101)], lteBands: [1, 3], nrBands: [78])
+            return ShellView(model: model)
+        }
     }
 
     func render(_ name: String, width: CGFloat, height: CGFloat, @ViewBuilder body: () -> some View) {

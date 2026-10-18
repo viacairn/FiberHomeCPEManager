@@ -41,7 +41,6 @@ public struct ControlsPage: View {
     @State private var rebootExpanded = false
     @State private var draftTime = "04:30"
     @State private var draftWeekday = "Everyday"
-    @State private var ledOn = true
     @State private var pendingUplink: UplinkTarget?
 
     public var body: some View {
@@ -65,11 +64,17 @@ public struct ControlsPage: View {
                     .padding(.bottom, 8)
             }
         }
-        .onChange(of: settings?.ledOn) { _, value in
-            if let value { ledOn = value }
+        .onChange(of: settings) { _, value in
+            guard let value else {
+                rebootExpanded = false; draftTime = ""; draftWeekday = ""
+                pendingUplink = nil
+                return
+            }
+            if !rebootExpanded {
+                draftTime = value.rebootTime; draftWeekday = value.rebootWeekday
+            }
         }
         .onAppear {
-            ledOn = settings?.ledOn ?? true
             if let settings {
                 draftTime = settings.rebootTime.isEmpty ? "04:30" : settings.rebootTime
                 draftWeekday = settings.rebootWeekday.isEmpty ? "Everyday" : settings.rebootWeekday
@@ -283,15 +288,20 @@ public struct ControlsPage: View {
                     Button {
                         withAnimation(Theme.snap) { rebootExpanded.toggle() }
                     } label: {
-                        VStack(alignment: .leading, spacing: 1.5) {
+                        HStack(alignment: .firstTextBaseline, spacing: 8) {
                             Text("定时重启").font(.system(size: 12, weight: .semibold))
-                            Text(rebootSummary).font(.system(size: 10, weight: .medium)).foregroundStyle(Theme.inkSecondary)
+                                .fixedSize()
+                            Text(rebootSummary)
+                                .font(.system(size: 10, weight: .medium).monospacedDigit())
+                                .foregroundStyle(Theme.inkSecondary)
+                                .lineLimit(1)
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
-                    .accessibilityLabel("定时重启，\(rebootSummary)，点击展开")
+                    .disabled(settings == nil)
+                    .accessibilityLabel("定时重启，\(rebootSummary)，点击\(rebootExpanded ? "收起" : "展开")")
 
                     Toggle("", isOn: Binding(
                         get: { settings?.rebootEnabled ?? false },
@@ -310,7 +320,7 @@ public struct ControlsPage: View {
                 .padding(.horizontal, 6)
                 .padding(.vertical, 6)
 
-                if rebootExpanded {
+                if rebootExpanded, settings != nil {
                     Rectangle().fill(Theme.hairline).frame(height: 0.5)
                         .padding(.horizontal, 6)
                         .padding(.vertical, 4)
@@ -377,7 +387,7 @@ public struct ControlsPage: View {
     }
 
     private var rebootSummary: String {
-        guard let settings else { return "读取中…" }
+        guard let settings else { return "—" }
         guard settings.rebootEnabled else { return "已关闭" }
         let day = settings.rebootWeekday.isEmpty ? "" : " · \(Self.weekdayLabel(settings.rebootWeekday))"
         return "\(settings.rebootTime)\(day)"
@@ -421,9 +431,8 @@ public struct ControlsPage: View {
                             .lineLimit(1)
                         Spacer(minLength: 0)
                         Toggle("", isOn: Binding(
-                            get: { settings != nil ? ledOn : false },
+                            get: { settings?.ledOn ?? false },
                             set: { value in
-                                ledOn = value
                                 onSaveLED(value)
                             }
                         ))
@@ -433,10 +442,6 @@ public struct ControlsPage: View {
                         .disabled(busy || settings == nil)
                         .accessibilityLabel("机身指示灯")
                     }
-                    Text(settings == nil ? "读取中…" : (ledOn ? "开启 · 关闭后熄灭" : "已关闭"))
-                        .font(.system(size: 9.5, weight: .medium))
-                        .foregroundStyle(Theme.inkSecondary)
-                        .lineLimit(1)
                 }
 
                 Panel(padding: 10, spacing: 5) {
@@ -448,31 +453,35 @@ public struct ControlsPage: View {
                             .fixedSize(horizontal: true, vertical: false)
                         Spacer(minLength: 0)
                         Menu {
-                            ForEach(FanMode.allCases, id: \.self) { mode in
-                                Button {
-                                    guard mode != settings?.fan else { return }
+                            Picker("风扇模式", selection: Binding<FanMode?>(
+                                get: { settings?.fan },
+                                set: { mode in
+                                    guard let mode, mode != settings?.fan else { return }
                                     onSaveFan(mode)
-                                } label: {
-                                    if mode == settings?.fan {
-                                        Label(mode.title, systemImage: "checkmark")
-                                    } else {
-                                        Text(mode.title)
-                                    }
+                                }
+                            )) {
+                                ForEach(FanMode.allCases, id: \.self) { mode in
+                                    Text(mode.title).tag(Optional(mode))
                                 }
                             }
+                            .pickerStyle(.inline)
+                            .labelsHidden()
                         } label: {
-                            Text(fanTitle)
-                                .font(.system(size: 11, weight: .medium))
+                            HStack(spacing: 5) {
+                                Text(fanTitle)
+                                    .font(.system(size: 11, weight: .medium))
+                                    .lineLimit(1)
+                                Image(systemName: "chevron.down")
+                                    .font(.system(size: 8, weight: .semibold))
+                                    .foregroundStyle(Theme.inkSecondary)
+                            }
                         }
                         .menuStyle(.borderlessButton)
+                        .menuIndicator(.hidden)
                         .fixedSize()
                         .disabled(busy || settings == nil)
                         .accessibilityLabel("风扇模式：\(fanTitle)")
                     }
-                    Text(settings == nil ? "读取中…" : (settings?.fan?.detail ?? "设备返回了未知模式"))
-                        .font(.system(size: 9.5, weight: .medium))
-                        .foregroundStyle(Theme.inkSecondary)
-                        .lineLimit(1)
                 }
             }
 

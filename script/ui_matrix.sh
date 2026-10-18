@@ -99,7 +99,7 @@ build script/ui_login.swift "$LOGIN"
 # ---------------------------------------------------------------- phase 1: login page
 say "phase 1 · login page"
 relaunch
-for scenario in login-empty login-extra login-fullwidth esc cmdw external-click; do
+for scenario in login-empty login-extra login-fullwidth esc cmdw external-click about; do
     run "$scenario"
 done
 
@@ -141,7 +141,7 @@ fi
 # ---------------------------------------------------------------- phase 2: connected app
 if [ -n "${CPE_PASS:-}" ] && [ "$DEVICE" = "1" ] && [ "$LOGGED_IN" = "1" ]; then
     say "phase 2 · connected"
-    for scenario in contextmenu styles keys devices-filter-select a11y controls sms sms-poll; do
+    for scenario in contextmenu styles keys devices-filter-select a11y controls sms sms-poll relogin; do
         run "$scenario"
     done
 fi

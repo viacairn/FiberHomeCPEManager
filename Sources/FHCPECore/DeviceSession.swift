@@ -17,6 +17,7 @@ public actor DeviceSession {
     private let transport: LocalTransport
     private let adapter: LG6851Adapter
     private lazy var extended = LG6851ExtendedAdapter(rpc: transport)
+    private lazy var radioLocks = RadioLockService(rpc: transport)
     private var refreshing = false
     private var receiveCounter = TrafficCounter()
     private var sendCounter = TrafficCounter()
@@ -108,6 +109,32 @@ public actor DeviceSession {
 
     public func setFanMode(_ mode: FanMode) async throws -> Bool {
         try await SettingsService(rpc: transport).setFanMode(mode)
+    }
+
+    public func readRadioLocks() async throws -> RadioLockState { try await radioLocks.read() }
+    public func setCellLockEnabled(_ enabled: Bool) async throws -> RadioLockState {
+        try await radioLocks.setCellLockEnabled(enabled)
+    }
+    public func setBandLockEnabled(_ enabled: Bool, lte: [Int], nr: [Int]) async throws -> RadioLockState {
+        try await radioLocks.setBandLockEnabled(enabled, lte: lte, nr: nr)
+    }
+    public func disableRadioLocks() async throws -> RadioLockState { try await radioLocks.disableAll() }
+    public func addLockedCell(_ cell: LockedCell) async throws -> RadioLockState {
+        try await radioLocks.addCell(act: cell.act, arfcn: cell.arfcn, pci: cell.pci)
+    }
+    public func updateLockedCell(_ cell: LockedCell) async throws -> RadioLockState {
+        try await radioLocks.updateCell(index: cell.index, act: cell.act, arfcn: cell.arfcn, pci: cell.pci)
+    }
+    public func deleteLockedCell(_ cell: LockedCell) async throws -> RadioLockState {
+        try await radioLocks.deleteCell(index: cell.index)
+    }
+    public func reserveIP(mac: String, ip: String) async throws {
+        _ = try await DHCPReservationService(rpc: transport).reserve(mac: mac, ip: ip)
+    }
+
+    /// An outage must not turn a pre-outage counter into the next live speed sample.
+    public func resetTrafficBaseline() {
+        receiveCounter = TrafficCounter(); sendCounter = TrafficCounter()
     }
 
     /// Diagnostic hook: reads arbitrary firmware nodes by path.

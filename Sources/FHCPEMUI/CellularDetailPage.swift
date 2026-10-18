@@ -14,10 +14,24 @@ public struct CellularDetailPage: View {
     public let onBack: () -> Void
     public let onRefreshCells: () -> Void
     public let onLockCurrent: (CellRecord?) -> Void
+    public let lockState: RadioLockState?
+    public let onSetCellLockEnabled: ((Bool) -> Void)?
+    public let onSetBandLockEnabled: ((Bool, [Int], [Int]) -> Void)?
+    public let onAddLockedCell: ((LockedCell) -> Void)?
+    public let onUpdateLockedCell: ((LockedCell) -> Void)?
+    public let onDeleteLockedCell: ((LockedCell) -> Void)?
+    public let onDisableLocks: (() -> Void)?
 
     public var initialTab = 0
     @State private var tab = 0
     @State private var selection: String?
+    @State private var lteBandText = ""
+    @State private var nrBandText = ""
+    @State private var cellEditorPresented = false
+    @State private var editingCellIndex: Int?
+    @State private var editingCellAct = 2
+    @State private var editingCellARFCN = ""
+    @State private var editingCellPCI = ""
 
     /// Firmware band values are either bare numbers (78) or already prefixed (N78/B3).
     /// Display them uppercase without adding a second prefix.
@@ -31,10 +45,20 @@ public struct CellularDetailPage: View {
     public init(data: PageData, cells: [CellRecord], lockMode: LockMode, lockBusy: Bool,
                 onBack: @escaping () -> Void, onRefreshCells: @escaping () -> Void,
                 onLockCurrent: @escaping (CellRecord?) -> Void,
-                initialTab: Int = 0) {
+                initialTab: Int = 0, lockState: RadioLockState? = nil,
+                onSetCellLockEnabled: ((Bool) -> Void)? = nil,
+                onSetBandLockEnabled: ((Bool, [Int], [Int]) -> Void)? = nil,
+                onAddLockedCell: ((LockedCell) -> Void)? = nil,
+                onUpdateLockedCell: ((LockedCell) -> Void)? = nil,
+                onDeleteLockedCell: ((LockedCell) -> Void)? = nil,
+                onDisableLocks: (() -> Void)? = nil) {
         self.data = data; self.cells = cells; self.lockMode = lockMode; self.lockBusy = lockBusy
         self.initialTab = initialTab
         self.onBack = onBack; self.onRefreshCells = onRefreshCells; self.onLockCurrent = onLockCurrent
+        self.lockState = lockState; self.onSetCellLockEnabled = onSetCellLockEnabled
+        self.onSetBandLockEnabled = onSetBandLockEnabled; self.onAddLockedCell = onAddLockedCell
+        self.onUpdateLockedCell = onUpdateLockedCell; self.onDeleteLockedCell = onDeleteLockedCell
+        self.onDisableLocks = onDisableLocks
     }
 
     public var body: some View {
@@ -50,8 +74,20 @@ public struct CellularDetailPage: View {
                 }
             }
             .frame(maxHeight: .infinity, alignment: .top)
-            .onAppear { if initialTab != 0 { tab = initialTab } }
+            .onAppear {
+                if initialTab != 0 { tab = initialTab }
+                loadBandDrafts()
+            }
         }
+        .onChange(of: lockState) { _, _ in loadBandDrafts() }
+        .onChange(of: data.isLive) { _, live in
+            if !live {
+                cellEditorPresented = false; selection = nil
+                editingCellIndex = nil; editingCellARFCN = ""; editingCellPCI = ""
+                lteBandText = ""; nrBandText = ""
+            }
+        }
+        .sheet(isPresented: $cellEditorPresented) { cellEditor }
     }
 
     private var segment: some View {
@@ -86,7 +122,7 @@ public struct CellularDetailPage: View {
                         Text(data.network)
                             .font(.system(size: 15, weight: .bold))
                             .foregroundStyle(.primary)
-                        if let nrMode = data.snapshot?.nrMode, !nrMode.isEmpty {
+                        if data.isLive, let nrMode = data.snapshot?.nrMode, !nrMode.isEmpty {
                             Text(nrMode)
                                 .font(.system(size: 9.5, weight: .bold))
                                 .foregroundStyle(.white)
@@ -104,7 +140,8 @@ public struct CellularDetailPage: View {
                                 .overlay(Capsule().strokeBorder(Color.accentColor.opacity(0.32), lineWidth: 0.75))
                         }
                     }
-                    let operatorName = CarrierMapper.displayName(for: data.radio.plmn ?? data.snapshot?.plmn)
+                    let plmn = data.isLive ? (data.radio.plmn ?? data.snapshot?.plmn) : nil
+                    let operatorName = plmn.map { CarrierMapper.displayName(for: $0) } ?? "—"
                     Text("\(operatorName) · PCI \(data.radio.pci ?? "—") · 频点 \(data.radio.arfcn ?? "—")")
                         .font(.system(size: 10.5, weight: .medium).monospacedDigit())
                         .foregroundStyle(Theme.inkSecondary)
@@ -113,8 +150,8 @@ public struct CellularDetailPage: View {
                 Spacer(minLength: 4)
                 VStack(alignment: .trailing, spacing: 5) {
                     HStack(spacing: 4) {
-                        StatusDot(data.uplinkAvailable ? .positive : .negative, size: 6)
-                        Text(data.uplink.title)
+                        StatusDot(data.isLive ? (data.uplinkAvailable ? .positive : .negative) : .neutral, size: 6)
+                        Text(data.isLive ? data.uplink.title : "—")
                             .font(.system(size: 10, weight: .semibold))
                             .foregroundStyle(.primary)
                     }
@@ -135,7 +172,7 @@ public struct CellularDetailPage: View {
     /// Primary RF measurements with color-coded signal quality bars + secondary RF row.
     private var signalQualityPanel: some View {
         VStack(alignment: .leading, spacing: 4) {
-            PanelHeading("射频信号质量", trailing: "实时测量")
+            PanelHeading("射频信号质量", trailing: data.isLive ? "实时测量" : "—")
             Panel(padding: 9, spacing: 7) {
                 HStack(spacing: 6) {
                     rfGaugeTile(
@@ -173,7 +210,7 @@ public struct CellularDetailPage: View {
     }
 
     private func rsrpQuality(_ rsrp: Double?) -> RFQuality {
-        guard let rsrp else { return RFQuality(tag: "待测", color: Theme.inkMuted, fraction: 0.15) }
+        guard let rsrp else { return RFQuality(tag: "—", color: Theme.inkMuted, fraction: 0) }
         if rsrp >= -85 { return RFQuality(tag: "极佳", color: Theme.positive, fraction: 0.92) }
         if rsrp >= -95 { return RFQuality(tag: "良好", color: Color.accentColor, fraction: 0.72) }
         if rsrp >= -105 { return RFQuality(tag: "一般", color: Theme.warning, fraction: 0.48) }
@@ -181,7 +218,7 @@ public struct CellularDetailPage: View {
     }
 
     private func rsrqQuality(_ rsrq: Double?) -> RFQuality {
-        guard let rsrq else { return RFQuality(tag: "待测", color: Theme.inkMuted, fraction: 0.15) }
+        guard let rsrq else { return RFQuality(tag: "—", color: Theme.inkMuted, fraction: 0) }
         if rsrq >= -10 { return RFQuality(tag: "极佳", color: Theme.positive, fraction: 0.90) }
         if rsrq >= -15 { return RFQuality(tag: "良好", color: Color.accentColor, fraction: 0.68) }
         if rsrq >= -20 { return RFQuality(tag: "一般", color: Theme.warning, fraction: 0.42) }
@@ -189,7 +226,7 @@ public struct CellularDetailPage: View {
     }
 
     private func sinrQuality(_ sinr: Double?) -> RFQuality {
-        guard let sinr else { return RFQuality(tag: "待测", color: Theme.inkMuted, fraction: 0.15) }
+        guard let sinr else { return RFQuality(tag: "—", color: Theme.inkMuted, fraction: 0) }
         if sinr >= 15 { return RFQuality(tag: "极佳", color: Theme.positive, fraction: 0.92) }
         if sinr >= 5 { return RFQuality(tag: "良好", color: Color.accentColor, fraction: 0.70) }
         if sinr >= 0 { return RFQuality(tag: "一般", color: Theme.warning, fraction: 0.45) }
@@ -223,7 +260,7 @@ public struct CellularDetailPage: View {
                         .frame(height: 4)
                     Capsule()
                         .fill(quality.color)
-                        .frame(width: max(6, geo.size.width * quality.fraction), height: 4)
+                        .frame(width: max(0, geo.size.width * quality.fraction), height: 4)
                 }
             }
             .frame(height: 4)
@@ -236,19 +273,32 @@ public struct CellularDetailPage: View {
     }
 
     private var carrierAggregation: some View {
-        let carriers = data.snapshot?.carriers ?? []
+        let carriers = data.isLive ? (data.snapshot?.carriers ?? []) : []
         let primary = carriers.first { $0.role == .primary }
         let secondaries = carriers.filter { $0.role == .secondary && $0.isPresent }
         let label = data.snapshot?.carrierAggregationLabel ?? "单载波 PCC"
         return VStack(alignment: .leading, spacing: 4) {
             PanelHeading("载波聚合状态",
-                         trailing: secondaries.isEmpty ? "单载波 · 未激活 SCC" : label)
+                         trailing: data.isLive ? (secondaries.isEmpty ? "单载波 · 未激活 SCC" : label) : "—")
             Panel(padding: 8, spacing: 4) {
-                carrierRow(badge: "PCC", name: "主载波", component: primary, fallback: primaryFallback, isPrimary: true)
-                ForEach(secondaries) { component in
-                    Rectangle().fill(Theme.hairline).frame(height: 0.5)
-                    carrierRow(badge: "SCC\(component.index)", name: "辅载波", component: component,
-                               fallback: "—", isPrimary: false)
+                if data.isLive {
+                    carrierRow(badge: "PCC", name: "主载波", component: primary, fallback: primaryFallback, isPrimary: true)
+                    ForEach(secondaries) { component in
+                        Rectangle().fill(Theme.hairline).frame(height: 0.5)
+                        carrierRow(badge: "SCC\(component.index)", name: "辅载波", component: component,
+                                   fallback: "—", isPrimary: false)
+                    }
+                } else {
+                    HStack {
+                        Text("当前载波")
+                            .foregroundStyle(Theme.inkSecondary)
+                        Spacer()
+                        Text("—")
+                            .foregroundStyle(Theme.inkMuted)
+                    }
+                    .font(.system(size: 10.5, weight: .medium))
+                    .padding(.horizontal, 4)
+                    .padding(.vertical, 3)
                 }
             }
         }
@@ -307,7 +357,7 @@ public struct CellularDetailPage: View {
                              valueFont: .system(size: 12, weight: .bold).monospacedDigit())
                     StatCell(label: "Cell ID (NCI)", value: data.radio.cell.map(FieldFormat.hex),
                              valueFont: .system(size: 11.5, weight: .bold).monospacedDigit())
-                    StatCell(label: "PLMN", value: data.radio.plmn ?? data.snapshot?.plmn,
+                    StatCell(label: "PLMN", value: data.isLive ? (data.radio.plmn ?? data.snapshot?.plmn) : nil,
                              valueFont: .system(size: 12, weight: .bold).monospacedDigit())
                 }
                 HStack(spacing: 6) {
@@ -330,7 +380,7 @@ public struct CellularDetailPage: View {
     }
 
     private var servingCell: CellRecord? {
-        cells.first { $0.state == .serving }
+        data.isLive ? cells.first { $0.state == .serving } : nil
     }
 
     // MARK: - Tab 1: Base Station & Cells (基站与小区)
@@ -392,7 +442,7 @@ public struct CellularDetailPage: View {
 
     private var cellCardsList: some View {
         Panel(padding: 7, spacing: 5) {
-            if cells.isEmpty {
+            if !data.isLive || cells.isEmpty {
                 VStack(spacing: 5) {
                     Image(systemName: "antenna.radiowaves.left.and.right.slash")
                         .font(.system(size: 18, weight: .light))
@@ -506,14 +556,14 @@ public struct CellularDetailPage: View {
 
     private func lockSection(current: CellRecord?) -> some View {
         let target = current ?? servingCell
-        let enabled = target != nil && !lockBusy && data.isLive
-        let lockedList = data.snapshot?.lockedCells ?? []
+        let enabled = canConfigureLocks && target.map(Self.isLockableCell) == true
+        let lockedList = effectiveLockState.cells
         let pill = CapsulePanelShape(maxRadius: 999)
         return VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 6) {
                 PanelHeading("小区锁定与选网策略")
                 Spacer()
-                Text(lockMode.title)
+                Text(lockState?.hasConflict == true ? "锁定冲突" : (lockState?.mode ?? lockMode).title)
                     .font(.system(size: 10, weight: .bold))
                     .foregroundStyle(lockMode.isAutomatic ? Theme.inkSecondary : Color.accentColor)
                     .padding(.horizontal, 7)
@@ -524,6 +574,26 @@ public struct CellularDetailPage: View {
                     )
             }
             Panel(padding: 10, spacing: 7) {
+                HStack(spacing: 8) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("锁小区")
+                            .font(.system(size: 11, weight: .bold))
+                        Text("使用候选列表，与锁频段互斥")
+                            .font(.system(size: 9.5, weight: .medium))
+                            .foregroundStyle(Theme.inkMuted)
+                    }
+                    Spacer(minLength: 4)
+                    Toggle("锁小区", isOn: Binding(
+                        get: { effectiveLockState.cellLockEnabled },
+                        set: { onSetCellLockEnabled?($0) }
+                    ))
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+                    .controlSize(.mini)
+                    .disabled(!canConfigureLocks || onSetCellLockEnabled == nil ||
+                              (!effectiveLockState.cellLockEnabled && lockedList.isEmpty))
+                }
+                Rectangle().fill(Theme.hairline).frame(height: 0.5)
                 HStack(spacing: 8) {
                     VStack(alignment: .leading, spacing: 2) {
                         Text(current == nil ? "当前服务小区" : "已选锁定目标")
@@ -542,7 +612,7 @@ public struct CellularDetailPage: View {
                     }
                     Spacer(minLength: 4)
                     Button {
-                        onLockCurrent(current)
+                        onLockCurrent(target)
                     } label: {
                         Text(current == nil ? "锁定当前小区" : "锁定所选小区")
                             .font(.system(size: 10.5, weight: .semibold))
@@ -557,12 +627,28 @@ public struct CellularDetailPage: View {
                     .disabled(!enabled)
                 }
 
-                if !lockedList.isEmpty {
-                    Rectangle().fill(Theme.hairline).frame(height: 0.5)
-                    VStack(alignment: .leading, spacing: 4) {
+                Rectangle().fill(Theme.hairline).frame(height: 0.5)
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 6) {
                         Text("已配置的锁定候选小区 (\(lockedList.count))")
                             .font(.system(size: 9.5, weight: .semibold))
                             .foregroundStyle(Theme.inkSecondary)
+                        Spacer()
+                        Button {
+                            presentCellEditor(nil)
+                        } label: {
+                            Label("添加", systemImage: "plus")
+                                .font(.system(size: 9.5, weight: .semibold))
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(Color.accentColor)
+                        .disabled(!canConfigureLocks || onAddLockedCell == nil || lockedList.count >= 20)
+                    }
+                    if lockedList.isEmpty {
+                        Text("添加候选小区后即可启用；最多可保存 20 个。")
+                            .font(.system(size: 9.5, weight: .medium))
+                            .foregroundStyle(Theme.inkMuted)
+                    } else {
                         ForEach(lockedList) { item in
                             HStack(spacing: 6) {
                                 Text(item.techTitle)
@@ -572,15 +658,242 @@ public struct CellularDetailPage: View {
                                     .font(.system(size: 10, weight: .medium).monospacedDigit())
                                     .foregroundStyle(Theme.inkSecondary)
                                 Spacer()
+                                Button {
+                                    presentCellEditor(item)
+                                } label: {
+                                    Image(systemName: "pencil")
+                                        .font(.system(size: 10, weight: .semibold))
+                                }
+                                .buttonStyle(.plain)
+                                .foregroundStyle(Color.accentColor)
+                                .help("编辑候选小区")
+                                .accessibilityLabel("编辑 \(item.techTitle) PCI \(item.pci)")
+                                .disabled(!canConfigureLocks || onUpdateLockedCell == nil)
+                                Button {
+                                    onDeleteLockedCell?(item)
+                                } label: {
+                                    Image(systemName: "trash")
+                                        .font(.system(size: 10, weight: .medium))
+                                }
+                                .buttonStyle(.plain)
+                                .foregroundStyle(Theme.inkSecondary)
+                                .help("删除候选小区")
+                                .accessibilityLabel("删除 \(item.techTitle) PCI \(item.pci)")
+                                .disabled(!canConfigureLocks || onDeleteLockedCell == nil)
                             }
                         }
                     }
-                } else {
-                    Text("点按上方任意小区可切换锁定目标；未锁定时由基站自动选网。")
-                        .font(.system(size: 9.5, weight: .medium))
+                }
+            }
+            bandLockPanel
+                .padding(.top, 5)
+            if let reason = lockState?.configurationBlockedReason {
+                Text(reason)
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(Theme.inkSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.top, 4)
+            }
+            if effectiveLockState.hasConflict {
+                Text("锁小区与锁频段同时开启，请先全部关闭以恢复自动选网。")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(Theme.inkSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.top, 4)
+            }
+            if effectiveLockState.cellLockEnabled || effectiveLockState.bandLockEnabled {
+                Button(effectiveLockState.hasConflict ? "全部关闭并修复" : "恢复自动选网") {
+                    onDisableLocks?()
+                }
+                .buttonStyle(.plain)
+                .font(.system(size: 10.5, weight: .semibold))
+                .foregroundStyle(Color.accentColor)
+                .frame(maxWidth: .infinity)
+                .frame(height: 27)
+                .background(Color.accentColor.opacity(0.10), in: pill)
+                .overlay(pill.strokeBorder(Color.accentColor.opacity(0.30), lineWidth: 0.75))
+                .disabled(!data.isLive || lockBusy || onDisableLocks == nil)
+                .padding(.top, 4)
+            }
+        }
+    }
+
+    private var effectiveLockState: RadioLockState {
+        if let lockState { return lockState }
+        switch lockMode {
+        case .automatic, .unknown:
+            return RadioLockState(cells: data.snapshot?.lockedCells ?? [])
+        case .cell:
+            return RadioLockState(cellLockEnabled: true, cells: data.snapshot?.lockedCells ?? [])
+        case .bands(let lte, let nr):
+            return RadioLockState(bandLockEnabled: true, cells: data.snapshot?.lockedCells ?? [], lteBands: lte, nrBands: nr)
+        }
+    }
+
+    private var canConfigureLocks: Bool {
+        data.isLive && !lockBusy && effectiveLockState.configurationBlockedReason == nil && !effectiveLockState.hasConflict
+    }
+
+    private static func isLockableCell(_ cell: CellRecord) -> Bool {
+        (cell.tech == .nr || cell.tech == .lte) &&
+        cell.channel.flatMap(Int.init).map { (0...875000).contains($0) } == true &&
+        Int(cell.pci).map { (0...2000).contains($0) } == true
+    }
+
+    private var bandLockPanel: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            PanelHeading("频段锁定")
+            Panel(padding: 10, spacing: 7) {
+                HStack(spacing: 6) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("锁频段")
+                            .font(.system(size: 11, weight: .bold))
+                        Text("开启时自动关闭锁小区")
+                            .font(.system(size: 9.5, weight: .medium))
+                            .foregroundStyle(Theme.inkMuted)
+                    }
+                    Spacer()
+                    Toggle("锁频段", isOn: Binding(
+                        get: { effectiveLockState.bandLockEnabled },
+                        set: { enabled in
+                            onSetBandLockEnabled?(enabled, parsedLTEBands ?? [], parsedNRBands ?? [])
+                        }
+                    ))
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+                    .controlSize(.mini)
+                    .disabled(!canConfigureLocks || onSetBandLockEnabled == nil ||
+                              (!effectiveLockState.bandLockEnabled && !bandDraftIsValid))
+                }
+                Rectangle().fill(Theme.hairline).frame(height: 0.5)
+                bandInput(label: "4G LTE", text: $lteBandText, prefix: "B", supported: effectiveLockState.supportedLTEBands)
+                bandInput(label: "5G NR", text: $nrBandText, prefix: "N", supported: effectiveLockState.supportedNRBands)
+                HStack(alignment: .center, spacing: 7) {
+                    Text(effectiveLockState.supportedLTEBands.contains(12)
+                         ? "频段以逗号分隔；B12/B17 合并选择。"
+                         : "频段以逗号分隔；LTE 不可只选 B32。")
+                        .font(.system(size: 9, weight: .medium))
                         .foregroundStyle(Theme.inkMuted)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 0)
+                    Button(effectiveLockState.bandLockEnabled ? "保存频段" : "启用锁频段") {
+                        if let lte = parsedLTEBands, let nr = parsedNRBands {
+                            onSetBandLockEnabled?(true, lte, nr)
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(Color.accentColor)
+                    .disabled(!canConfigureLocks || onSetBandLockEnabled == nil || !bandDraftIsValid)
                 }
             }
         }
+    }
+
+    private func bandInput(label: String, text: Binding<String>, prefix: String, supported: [Int]) -> some View {
+        HStack(spacing: 7) {
+            Text(label)
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(Theme.inkSecondary)
+                .frame(width: 43, alignment: .leading)
+            TextField("例如 \(supported.prefix(2).map { prefix + String($0) }.joined(separator: ", "))", text: text)
+                .textFieldStyle(.roundedBorder)
+                .font(.system(size: 10.5, weight: .medium).monospacedDigit())
+                .controlSize(.small)
+                .disabled(!canConfigureLocks || onSetBandLockEnabled == nil)
+                .help("支持：" + supported.map { prefix + String($0) }.joined(separator: "、"))
+        }
+    }
+
+    private static func parseBandInput(_ raw: String, prefix: Character) -> [Int]? {
+        let separators = CharacterSet(charactersIn: ",，、;； ").union(.whitespacesAndNewlines)
+        let values = raw.uppercased().components(separatedBy: separators).filter { !$0.isEmpty }
+        var result: [Int] = []
+        for value in values {
+            let number = value.first == prefix ? String(value.dropFirst()) : value
+            guard let band = Int(number), band > 0 else { return nil }
+            result.append(band)
+        }
+        return Array(Set(result)).sorted()
+    }
+
+    private var parsedLTEBands: [Int]? { Self.parseBandInput(lteBandText, prefix: "B") }
+    private var parsedNRBands: [Int]? { Self.parseBandInput(nrBandText, prefix: "N") }
+    private var bandDraftIsValid: Bool {
+        guard let lte = parsedLTEBands, let nr = parsedNRBands, !lte.isEmpty || !nr.isEmpty,
+              lte.allSatisfy(effectiveLockState.supportedLTEBands.contains),
+              nr.allSatisfy(effectiveLockState.supportedNRBands.contains), lte != [32], nr != [29] else { return false }
+        return lte.isEmpty || !Set(lte).isSubset(of: [29, 46])
+    }
+
+    private func loadBandDrafts() {
+        lteBandText = effectiveLockState.lteBands.map(String.init).joined(separator: ",")
+        nrBandText = effectiveLockState.nrBands.map(String.init).joined(separator: ",")
+    }
+
+    private func presentCellEditor(_ item: LockedCell?) {
+        editingCellIndex = item?.index
+        if let item {
+            editingCellAct = item.act
+            editingCellARFCN = String(item.arfcn)
+            editingCellPCI = String(item.pci)
+        } else if let target = selectedCell ?? servingCell, Self.isLockableCell(target) {
+            editingCellAct = target.tech == .lte ? 1 : 2
+            editingCellARFCN = target.channel ?? ""
+            editingCellPCI = target.pci
+        } else {
+            editingCellAct = 2; editingCellARFCN = ""; editingCellPCI = ""
+        }
+        cellEditorPresented = true
+    }
+
+    private var cellEditorValue: LockedCell? {
+        guard let arfcn = Int(editingCellARFCN), let pci = Int(editingCellPCI),
+              (0...875000).contains(arfcn), (0...2000).contains(pci),
+              effectiveLockState.allowsN79ARFCN || !(693335...733333).contains(arfcn) else { return nil }
+        return LockedCell(index: editingCellIndex ?? 0, act: editingCellAct, arfcn: arfcn, pci: pci)
+    }
+
+    private var cellEditor: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(editingCellIndex == nil ? "添加候选小区" : "编辑候选小区")
+                .font(.system(size: 14, weight: .bold))
+            Picker("网络制式", selection: $editingCellAct) {
+                Text("4G LTE").tag(1)
+                Text("5G NR").tag(2)
+            }
+            .pickerStyle(.segmented)
+            .controlSize(.small)
+            VStack(alignment: .leading, spacing: 4) {
+                Text("频点 ARFCN")
+                    .font(.system(size: 10.5, weight: .semibold))
+                    .foregroundStyle(Theme.inkSecondary)
+                TextField("0–875000", text: $editingCellARFCN)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 12).monospacedDigit())
+                Text("PCI")
+                    .font(.system(size: 10.5, weight: .semibold))
+                    .foregroundStyle(Theme.inkSecondary)
+                    .padding(.top, 4)
+                TextField("0–2000", text: $editingCellPCI)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 12).monospacedDigit())
+            }
+            HStack(spacing: 8) {
+                Spacer()
+                Button("取消") { cellEditorPresented = false }
+                    .keyboardShortcut(.cancelAction)
+                Button("保存") {
+                    guard let value = cellEditorValue else { return }
+                    if editingCellIndex == nil { onAddLockedCell?(value) }
+                    else { onUpdateLockedCell?(value) }
+                    cellEditorPresented = false
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(cellEditorValue == nil || !canConfigureLocks)
+            }
+        }
+        .padding(18)
+        .frame(width: 290)
     }
 }
