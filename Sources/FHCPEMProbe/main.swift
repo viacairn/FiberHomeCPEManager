@@ -35,6 +35,27 @@ struct Probe {
 
         let arguments = Array(CommandLine.arguments.dropFirst())
 
+        if arguments.first == "--network-audit" {
+            await auditNetwork(session)
+            await session.close()
+            exit(0)
+        }
+        if arguments.first == "--port-add-test" {
+            await portAddTest(session)
+            await session.close()
+            exit(0)
+        }
+        if arguments.first == "--ddns-add-test" {
+            await ddnsAddTest(session)
+            await session.close()
+            exit(0)
+        }
+        if arguments.first == "--mobile-test" {
+            await mobileTest(session)
+            await session.close()
+            exit(0)
+        }
+
         // `--sms-list` prints conversations; `--sms-send NUMBER BODY` sends one message and
         // re-lists after a short wait, which is how outbound + inbox sync are verified
         // without driving the UI.

@@ -42,7 +42,9 @@ CPE_PASS='…' ./script/ui_matrix.sh    # 完整 UI 矩阵（单次，约 90 秒
 | §2 保存密码 / 导入网关 | `login-extra` | 勾选项存在、清空 IP 后能回填 |
 | §2 全角密码拦截 | `login-fullwidth` | 全角逗号提示出现、改为半角后提示消失 |
 | §1 菜单栏两种宽度 | `styles` | 勾选后变宽（30.5 → 92.5 pt）、取消后还原 |
-| §8.2 右键菜单 | `contextmenu` | 退出项、显示网速项；不含打开面板/立即刷新 |
+| §8.2 右键菜单 | `contextmenu` | 退出项、显示网速项、重新登录；不含打开面板/立即刷新 |
+| §8.2 重新登录 | `relogin` | 菜单「重新登录」回到连接页并自动使用已保存凭据 |
+| 关于页 | `about` | 登录页与在线状态均可打开，Esc/返回回到来源页 |
 | §8.2 点击外部关闭 | `external-click` | 面板消失 |
 | §8.2 Esc / ⌘W | `esc`、`cmdw` | 关闭面板、不退出应用；二级页 Esc 返回 |
 | §8.2 ⌘1–⌘4 | `keys` | 四个页签分别落到正确页面 |
@@ -59,7 +61,23 @@ CPE_PASS='…' ./script/ui_matrix.sh    # 完整 UI 矩阵（单次，约 90 秒
 
 `a11y` 还带两个防假通过条件：应用未运行直接 FAIL；扫到的页面少于 6 个也 FAIL。
 
+2026-10-18 实跑（设备在线）：**72 passed, 0 failed, 0 skipped（121 秒）**，含 `about`、`relogin`、`fan-mode`、`mobile`、`advanced`。此前三项失败是探针选择器过期（旧「筛选胶囊」「写短信」「回复内容」标签），已改为当前界面的四个常驻筛选、`新消息`、`短信内容`。
+
 `tabs` 场景已删除：它的四个页面落点断言与 `keys` 完全重复，只是多花 5 秒。
+
+### 断线与会话失效
+
+不需要设备，单元测试即可覆盖主要契约：
+
+| 测试套件 | 覆盖 |
+| --- | --- |
+| `PageDataTests` | 断线后 `snapshot` / `devices` 不透过 `isLive` 暴露；晚到数据不能回填 |
+| `ShellSessionTests` | 认证失效 → 清空会话、回到登录页、保留可重登状态 |
+| `EndToEndTests` | 被挤占后受保护读返回 `CPEError.authentication` |
+| `RadioLockTests` / `DHCPReservationTests` | 写入前校验、互斥、失败不重试、回读不一致判 `uncertain` |
+| `SafetyTests` | 登录页 HTML/418 识别；短信正文含 `<html>` 不被误判 |
+
+离屏渲染 `UIRender` 的 `16-offline-devices`、`17-offline-sms`、`18-offline-cellular` 用 fixture 固定断线态，不依赖真机。
 
 ### 设备不可达时
 
@@ -69,7 +87,7 @@ device
 login
   SKIP  设备不可达，跳过登录与已连接页检查
 summary
-  15 passed, 0 failed, 1 skipped  (40s)
+  19 passed, 0 failed, 1 skipped  (51s)
 ```
 
 这是**跳过**而不是失败：应用本身没有问题，只是这台 Mac 不在设备网段。演练可用 `CPE_HOST=192.0.2.1`（TEST-NET-1）。
@@ -84,6 +102,7 @@ summary
 .build/ui_probe controls-toggle         # 关/开指示灯，验证写入与还原
 .build/ui_probe sms-send                # 给 10010 发「流量查询」，验证状态与已发送气泡
 .build/ui_probe sms-poll                # 停留短信页 7 秒，确认同步时间戳更新
+.build/debug/FiberHomeCPEManagerProbe --session-audit   # 两个原生入口：验证客户端会话可并存（会挤掉浏览器会话）
 ```
 
 以下为本轮融合前的历史实测，不能替代当前构建的界面验收：2026-10-18 的 `controls-stable` 4 个开关 3 秒无变化；`controls-toggle` 写入 1→0→1；`sms-send` 状态「已回复 10010」，会话出现「已发送，流量查询」，设备 `get_sms_data` 回读 29 条；`sms-poll` 的「同步 HH:mm:ss」在 7 秒内更新。本轮没有再次发送短信。

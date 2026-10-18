@@ -86,6 +86,7 @@ FiberHome LG6851F 5G CPE 的原生 macOS 菜单栏控制台与桌面磁贴。Swi
 - [实现状态](docs/IMPLEMENTATION-STATUS.md)：已实现范围与明确未启用项。
 - [会话互斥实测](docs/protocol/SESSION-CONTENTION.md)：WebUI 与客户端互相挤占、错误分层与显式重新登录。
 - [协议基线](docs/protocol/RP0112.md)：FHAPIS 传输、加密协商与测试向量。
+- [高级控制契约](docs/protocol/ADVANCED-CONTROLS-2026-10-18.md)：风扇、移动网络、DDNS、端口映射的节点与真机回环。
 
 真机关键反例（这些直接改变了实现）：
 

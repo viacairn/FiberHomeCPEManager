@@ -282,6 +282,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             model.closeCellular()
             return true
         }
+        if model.route == .ddns {
+            model.closeDDNS()
+            return true
+        }
+        if model.route == .portMapping {
+            model.closePortMapping()
+            return true
+        }
         if model.tab == 3, model.smsRoute != .threads {
             model.smsRoute = .threads
             model.selectedThreadID = nil

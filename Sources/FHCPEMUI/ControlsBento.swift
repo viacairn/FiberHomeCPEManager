@@ -580,6 +580,115 @@ public struct ControlsPage: View {
             .opacity(settings?.supportsMLO == true ? 1 : 0.78)
         }
     }
+
+    // MARK: - Mobile network
+
+    private var mobileSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            PanelHeading("移动网络")
+            Panel(padding: 10, spacing: 7) {
+                mobileRow("飞行模式", symbol: "airplane",
+                          isOn: Binding(get: { mobile?.airplaneMode ?? false },
+                                        set: { onSetAirplaneMode($0) }),
+                          enabled: mobile != nil && !busy)
+                Rectangle().fill(Theme.hairline).frame(height: 0.5)
+                mobileRow("蜂窝数据", symbol: "antenna.radiowaves.left.and.right",
+                          isOn: Binding(get: { mobile?.cellularDataEnabled ?? false },
+                                        set: { onSetCellularData($0) }),
+                          enabled: mobile != nil && !busy)
+                Rectangle().fill(Theme.hairline).frame(height: 0.5)
+                HStack(spacing: 6) {
+                    Image(systemName: "dot.radiowaves.left.and.right")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(Theme.inkSecondary)
+                    Text("外置天线")
+                        .font(.system(size: 11.5, weight: .semibold))
+                    Spacer(minLength: 0)
+                    if mobile?.antennaEnabled == true {
+                        Picker("天线类型", selection: Binding(
+                            get: { mobile?.antennaType ?? .automatic },
+                            set: { onSaveAntenna(true, $0) }
+                        )) {
+                            ForEach(AntennaType.allCases, id: \.self) { type in
+                                Text(type.title).tag(type)
+                            }
+                        }
+                        .pickerStyle(.menu)
+                        .labelsHidden()
+                        .controlSize(.small)
+                        .fixedSize()
+                        .disabled(mobile == nil || busy)
+                    }
+                    Toggle("外置天线", isOn: Binding(
+                        get: { mobile?.antennaEnabled ?? false },
+                        set: { onSaveAntenna($0, mobile?.antennaType ?? .automatic) }
+                    ))
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+                    .controlSize(.mini)
+                    .disabled(mobile == nil || busy)
+                }
+            }
+        }
+    }
+
+    private func mobileRow(_ title: String, symbol: String,
+                           isOn: Binding<Bool>, enabled: Bool) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: symbol)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(Theme.inkSecondary)
+            Text(title)
+                .font(.system(size: 11.5, weight: .semibold))
+            Spacer(minLength: 0)
+            Toggle(title, isOn: isOn)
+                .labelsHidden()
+                .toggleStyle(.switch)
+                .controlSize(.mini)
+                .disabled(!enabled)
+        }
+    }
+
+    // MARK: - Network services
+
+    private var networkServicesSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            PanelHeading("网络服务")
+            Panel(padding: 4, spacing: 0) {
+                serviceRow("DDNS 设置", symbol: "globe", count: ddnsCount, action: onOpenDDNS)
+                Rectangle().fill(Theme.hairline).frame(height: 0.5).padding(.leading, 30)
+                serviceRow("端口映射", symbol: "arrow.left.arrow.right", count: portMappingCount,
+                           action: onOpenPortMapping)
+            }
+        }
+    }
+
+    private func serviceRow(_ title: String, symbol: String, count: Int?,
+                            action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 8) {
+                Image(systemName: symbol)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(Theme.inkSecondary)
+                    .frame(width: 18, height: 18)
+                Text(title)
+                    .font(.system(size: 11.5, weight: .semibold))
+                Spacer(minLength: 0)
+                Text(count.map { "\($0)" } ?? "—")
+                    .font(.system(size: 10, weight: .medium).monospacedDigit())
+                    .foregroundStyle(Theme.inkSecondary)
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 8.5, weight: .bold))
+                    .foregroundStyle(Theme.inkMuted)
+            }
+            .padding(.horizontal, 6)
+            .frame(height: 32)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(busy)
+        .accessibilityLabel("\(title)，\(count.map { "\($0) 条" } ?? "未读取")")
+    }
 }
 
 /// One SSID row: clean SSID name (tap to rename) and an instant enable switch, without description subtext.
