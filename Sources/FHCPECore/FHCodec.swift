@@ -44,6 +44,13 @@ public enum FHCodec {
         guard status == kCCSuccess else { throw CPEError.crypto }
         output.count = written; return output
     }
+    /// The firmware's shared protocol constant as DER. It is protocol metadata (used to
+    /// unwrap the negotiation seed), not a user secret or a TLS identity.
+    public static func protocolKeyDER() -> Data? {
+        guard let path = Bundle.module.url(forResource: "firmware-protocol", withExtension: "der") else { return nil }
+        return try? Data(contentsOf: path)
+    }
+
     public static func negotiationSeed(_ envelope: String) throws -> String {
         guard envelope.count > 6, let encrypted = Data(base64Encoded: String(envelope.dropFirst(6))),
               let path = Bundle.module.url(forResource: "firmware-protocol", withExtension: "der") else { throw CPEError.crypto }

@@ -11,12 +11,20 @@ public actor LocalTransport: DeviceRPC {
     private let address: DeviceAddress
     private let session: URLSession
     private var seed: String?
+    /// Serialises RPC calls instead of failing them.
+    ///
+    /// The wire protocol derives one envelope per request and the firmware dislikes
+    /// interleaved sessions, so only one call may run at a time. The previous version
+    /// *rejected* the second caller with `CPEError.busy`, which surfaced to users as
+    /// "另一项操作正在进行" whenever the 1 Hz snapshot collided with an SMS reload.
+    /// Callers now queue.
     private var inFlight = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
     public init(address: DeviceAddress) {
         self.address = address
         let config = URLSessionConfiguration.ephemeral
         config.urlCache = nil; config.requestCachePolicy = .reloadIgnoringLocalCacheData
-        config.timeoutIntervalForRequest = 12; config.timeoutIntervalForResource = 20
+        config.timeoutIntervalForRequest = 6; config.timeoutIntervalForResource = 12
         config.httpMaximumConnectionsPerHost = 1
         session = URLSession(configuration: config, delegate: RedirectBlocker(), delegateQueue: nil)
     }
@@ -37,9 +45,25 @@ public actor LocalTransport: DeviceRPC {
         guard data.count <= 8_000_000 else { throw CPEError.malformedResponse }
         return data
     }
+    private func acquire() async {
+        if !inFlight { inFlight = true; return }
+        await withCheckedContinuation { continuation in
+            waiters.append(continuation)
+        }
+    }
+
+    private func release() {
+        if waiters.isEmpty {
+            inFlight = false
+        } else {
+            // The next waiter keeps `inFlight` true and takes ownership.
+            waiters.removeFirst().resume()
+        }
+    }
+
     public func call(_ method: String, data: JSONValue = .null, publicAccess: Bool = false) async throws -> JSONValue {
-        guard !inFlight else { throw CPEError.busy }
-        inFlight = true; defer { inFlight = false }
+        await acquire()
+        defer { release() }
         if seed == nil {
             let negotiation = try JSONDecoder().decode(JSONValue.self, from: await request("/fh_api/tmp/FHNCAPIS?ajaxmethod=is_encrypt"))
             guard let envelope = negotiation["data"].text else { throw CPEError.crypto }
