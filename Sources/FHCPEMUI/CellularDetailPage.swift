@@ -836,11 +836,11 @@ public struct CellularDetailPage: View {
         if let item {
             editingCellAct = item.act
             editingCellARFCN = String(item.arfcn)
-            editingCellPCI = String(item.pci)
+            editingCellPCI = item.pci.map(String.init) ?? ""
         } else if let target = selectedCell ?? servingCell, Self.isLockableCell(target) {
             editingCellAct = target.tech == .lte ? 1 : 2
             editingCellARFCN = target.channel ?? ""
-            editingCellPCI = target.pci
+            editingCellPCI = target.pci ?? ""
         } else {
             editingCellAct = 2; editingCellARFCN = ""; editingCellPCI = ""
         }
