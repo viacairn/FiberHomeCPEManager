@@ -148,7 +148,7 @@ fi
 # ---------------------------------------------------------------- phase 2: connected app
 if [ -n "${CPE_PASS:-}" ] && [ "$DEVICE" = "1" ] && [ "$LOGGED_IN" = "1" ]; then
     say "phase 2 · connected"
-    for scenario in contextmenu styles keys devices-filter-select a11y controls fan-layout sms sms-poll relogin; do
+    for scenario in contextmenu styles keys devices-filter-select a11y layout controls fan-layout mobile advanced sms sms-poll relogin; do
         run "$scenario"
     done
 fi

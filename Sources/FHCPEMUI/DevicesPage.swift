@@ -11,9 +11,9 @@ public struct DevicesPage: View {
     public let onReload: () -> Void
     public let onReserveIP: (@MainActor (ConnectedDevice, String) async throws -> Void)?
     @State private var glyphs = DeviceGlyphStore()
-    @State private var glyphRevision = 0
+    @State private var glyphEntries: [String: DeviceGlyphStore.Entry] = [:]
     @State private var editingDevice: ConnectedDevice?
-    @State private var glyphTarget: ConnectedDevice?
+    @State private var filterMenuOpen = false
 
     public init(devices: [ConnectedDevice], isLive: Bool,
                 query: Binding<String>, filter: Binding<AccessFilter>,
@@ -59,36 +59,40 @@ public struct DevicesPage: View {
     }
 
     public var body: some View {
-        VStack(spacing: 0) {
-            toolbar
-                .padding(.horizontal, Theme.contentPadding)
-                .padding(.top, 0)
-            list
-                .padding(.top, 8)
-        }
+        let shown = filtered
+        deviceCanvas(shown)
         .sheet(item: $editingDevice) { device in
             DHCPReservationEditor(device: device, isLive: isLive, onSave: onReserveIP)
         }
-        .sheet(item: $glyphTarget) { device in
-            GlyphPicker(device: device, current: glyphs.glyph(for: device)) { choice in
-                glyphs.assign(choice, to: device)
-                glyphRevision += 1
-            }
-        }
         .onChange(of: isLive) { _, live in
-            if !live { editingDevice = nil; glyphTarget = nil }
+            if !live { editingDevice = nil; filterMenuOpen = false }
         }
     }
 
-    /// Search bar + White Liquid Glass access filter tabs (`全部 / 2.4Ghz / 5.0Ghz / 以太网`).
-    private var toolbar: some View {
-        VStack(spacing: 6) {
-            searchField
-            filterTabs
+    @ViewBuilder private func deviceCanvas(_ shown: [ConnectedDevice]) -> some View {
+        if #available(macOS 26.0, *) {
+            list(shown)
+                .safeAreaBar(edge: .top, spacing: 12) {
+                    toolbar(shownCount: shown.count).padding(.horizontal, Theme.contentPadding)
+                }
+                .scrollEdgeEffectStyle(.soft, for: .top)
+        } else {
+            list(shown)
+                .safeAreaInset(edge: .top, spacing: 12) {
+                    toolbar(shownCount: shown.count).padding(.horizontal, Theme.contentPadding)
+                }
         }
     }
 
-    private var searchField: some View {
+    /// One compact row: search and a capsule opening the same popover style as fan control.
+    private func toolbar(shownCount: Int) -> some View {
+        HStack(spacing: 8) {
+            searchField(summary: summary(shownCount: shownCount))
+            accessFilterMenu
+        }
+    }
+
+    private func searchField(summary: String) -> some View {
         HStack(spacing: 6) {
             Image(systemName: "magnifyingglass")
                 .font(.system(size: 11, weight: .medium))
@@ -97,6 +101,7 @@ public struct DevicesPage: View {
                 .textFieldStyle(.plain)
                 .font(.system(size: 11.5))
                 .foregroundStyle(.primary)
+                .accessibilityIdentifier("device-search")
             if !query.isEmpty {
                 Button { query = "" } label: {
                     Image(systemName: "xmark.circle.fill")
@@ -119,88 +124,92 @@ public struct DevicesPage: View {
             .strokeBorder(Theme.hairlineStrong, lineWidth: 0.75))
     }
 
-    private var filterTabs: some View {
-        let barShape = CapsulePanelShape(maxRadius: 999)
-        return HStack(spacing: 3) {
-            ForEach(AccessFilter.allCases) { item in
-                let selected = filter == item
-                let count = isLive ? devices.filter(item.matches).count : 0
-                Button {
-                    withAnimation(Theme.snap) { filter = item }
-                } label: {
-                    HStack(spacing: 3) {
-                        Text(item.title)
-                            .font(.system(size: 10.5, weight: selected ? .semibold : .medium))
-                            .lineLimit(1)
-                        if isLive {
-                            Text("\(count)")
-                                .font(.system(size: 9, weight: .semibold).monospacedDigit())
-                                .foregroundStyle(selected ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(Theme.inkMuted))
-                        }
-                    }
-                    .foregroundStyle(selected ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(Theme.inkSecondary))
-                    .frame(maxWidth: .infinity)
-                    .frame(height: 24)
-                    .background(
-                        barShape.fill(selected ? Color.white.opacity(0.95) : Color.clear)
-                    )
-                    .overlay(
-                        barShape.strokeBorder(selected ? Color.accentColor.opacity(0.38) : Color.clear, lineWidth: 0.75)
-                    )
-                    .shadow(color: selected ? Color.black.opacity(0.06) : .clear, radius: 3, y: 1)
-                    .contentShape(barShape)
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("\(item.title)，\(count) 台")
-                .accessibilityAddTraits(selected ? [.isSelected, .isButton] : .isButton)
+    private var accessFilterMenu: some View {
+        Button { filterMenuOpen.toggle() } label: {
+            HStack(spacing: 5) {
+                Text(filter.title)
+                    .font(.system(size: 10.5, weight: .semibold))
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 8, weight: .semibold))
             }
+            .foregroundStyle(filter == .all ? Theme.inkSecondary : Color.accentColor)
+            .padding(.horizontal, 10)
+            .frame(width: 88, height: 28)
+            .contentShape(Capsule())
         }
-        .padding(3)
-        .background(Theme.surface, in: barShape)
-        .overlay(barShape.strokeBorder(Theme.hairlineStrong, lineWidth: 0.75))
+        .buttonStyle(.plain)
+        .background(Theme.panelFill, in: Capsule())
+        .overlay(Capsule().strokeBorder(Theme.hairlineStrong, lineWidth: 0.75))
+        .popover(isPresented: $filterMenuOpen, arrowEdge: .top) {
+            VStack(spacing: 2) {
+                ForEach(AccessFilter.allCases) { item in
+                    let count = isLive ? "\(devices.lazy.filter(item.matches).count) 台" : "—"
+                    Button {
+                        filterMenuOpen = false
+                        filter = item
+                    } label: {
+                        HStack(spacing: 8) {
+                            Text(item.title).font(.system(size: 11))
+                            Spacer(minLength: 0)
+                            Text(count)
+                                .font(.system(size: 10).monospacedDigit())
+                                .foregroundStyle(Theme.inkSecondary)
+                            Image(systemName: "checkmark")
+                                .font(.system(size: 9, weight: .bold))
+                                .foregroundStyle(Color.accentColor)
+                                .opacity(filter == item ? 1 : 0)
+                                .frame(width: 12)
+                                .accessibilityHidden(true)
+                        }
+                        .padding(.horizontal, 8)
+                        .frame(width: 144, height: 24)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("\(item.title)，\(count)")
+                    .accessibilityValue(filter == item ? "已选择" : "")
+                }
+            }
+            .padding(6)
+        }
+        .accessibilityLabel("接入类型筛选")
+        .accessibilityValue(isLive ? filter.title : "\(filter.title)，未连接")
+        .accessibilityIdentifier("device-access-filter")
     }
 
-    private var summary: String {
+    private func summary(shownCount: Int) -> String {
         guard isLive else { return "—" }
-        let shown = filtered.count, total = devices.count
-        return query.isEmpty && filter == .all ? "\(shown) 台" : "\(shown)/\(total) 台"
+        let total = devices.count
+        return query.isEmpty && filter == .all ? "\(shownCount) 台" : "\(shownCount)/\(total) 台"
     }
 
-    private var list: some View {
-        ScrollView(.vertical) {
+    private func list(_ shown: [ConnectedDevice]) -> some View {
+        return ScrollView(.vertical) {
             if !isLive {
                 Color.clear.frame(height: 0)
-            } else if filtered.isEmpty {
+            } else if shown.isEmpty {
                 emptyState
                     .padding(.horizontal, Theme.contentPadding)
             } else {
                 Panel(padding: 6, spacing: 0) {
-                    ForEach(filtered) { device in
+                    ForEach(shown) { device in
                         DeviceRow(device: device,
-                                  symbol: glyphs.glyph(for: device)?.symbol ?? device.systemSymbol)
-                            .id("\(device.id)#\(glyphRevision)")
-                            .contextMenu {
-                                Button {
-                                    editingDevice = device
-                                } label: {
-                                    Label("设置固定 IP…", systemImage: "pin")
-                                }
-                                .disabled(onReserveIP == nil
-                                          || device.mac?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false)
-                                Divider()
-                                // Flat items only: a nested submenu is rebuilt by the once-per-second
-                                // refresh while it is open, which closed it under the cursor.
-                                Button {
-                                    glyphTarget = device
-                                } label: {
-                                    Label("设置图标…", systemImage: "square.grid.2x2")
-                                }
-                                Button("恢复自动识别") {
-                                    glyphs.assign(nil, to: device)
-                                    glyphRevision += 1
-                                }
+                                  symbol: glyphs.glyph(for: device, in: glyphEntries)?.symbol ?? device.systemSymbol)
+                            .accessibilityHidden(true)
+                            .overlay {
+                                DeviceContextMenu(
+                                    device: device, glyph: glyphs.glyph(for: device, in: glyphEntries),
+                                    canReserveIP: onReserveIP != nil &&
+                                        device.mac?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false,
+                                    onReserve: { editingDevice = $0 },
+                                    onGlyph: { device, glyph in
+                                        glyphs.assign(glyph, to: device)
+                                        glyphEntries = glyphs.all()
+                                    })
                             }
-                        if device.id != filtered.last?.id {
+                        if device.id != shown.last?.id {
                             Rectangle()
                                 .fill(Theme.hairline)
                                 .frame(height: 0.5)
@@ -210,20 +219,21 @@ public struct DevicesPage: View {
                     }
                 }
                 .padding(.horizontal, Theme.contentPadding)
-                .padding(.bottom, Theme.contentPadding)
             }
         }
         .scrollIndicators(.automatic)
-        .onAppear { glyphs.prune(keeping: devices) }
-        .onChange(of: devices) { _, new in
-            glyphs.prune(keeping: new)
-            if let editingDevice, !new.contains(where: { $0.id == editingDevice.id }) {
+        .onAppear { loadGlyphAssignments() }
+        .onChange(of: devices.map { [$0.id, $0.mac ?? "", $0.hostname ?? "", $0.name] }) { _, _ in
+            loadGlyphAssignments()
+            if let editingDevice, !devices.contains(where: { $0.id == editingDevice.id }) {
                 self.editingDevice = nil
             }
-            if let glyphTarget, !new.contains(where: { $0.id == glyphTarget.id }) {
-                self.glyphTarget = nil
-            }
         }
+    }
+
+    private func loadGlyphAssignments() {
+        glyphs.prune(keeping: devices)
+        glyphEntries = glyphs.all()
     }
 
     private var emptyState: some View {
@@ -253,6 +263,7 @@ private struct DHCPReservationEditor: View {
     let isLive: Bool
     let onSave: (@MainActor (ConnectedDevice, String) async throws -> Void)?
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.appNotices) private var notices
     @State private var ip: String
     @State private var saving = false
     @State private var saveError: String?
@@ -308,9 +319,6 @@ private struct DHCPReservationEditor: View {
                     .foregroundStyle(Theme.inkMuted)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            if let error = saveError ?? validationError {
-                StatusBanner(text: error, tone: .error)
-            }
             HStack(spacing: Theme.Space.s) {
                 Button("取消") { dismiss() }
                     .buttonStyle(.plain)
@@ -336,6 +344,8 @@ private struct DHCPReservationEditor: View {
         .interactiveDismissDisabled(saving)
         .onAppear { ipFocused = true }
         .onChange(of: ip) { _, _ in saveError = nil }
+        .appReminder(saveError ?? validationError)
+        .appNoticeOverlay(top: 36)
     }
 
     private func save() {
@@ -346,6 +356,7 @@ private struct DHCPReservationEditor: View {
             defer { saving = false }
             do {
                 try await onSave(device, ip.trimmingCharacters(in: .whitespacesAndNewlines))
+                notices?.show("已保存固定 IP 绑定", tone: .success)
                 dismiss()
             } catch {
                 saveError = error.localizedDescription
@@ -478,60 +489,5 @@ private struct DeviceRow: View {
         if days > 0 { return "\(days) 天" }
         if hours > 0 { return "\(hours) 小时" }
         return "\(minutes) 分"
-    }
-}
-
-/// Icon chooser shown as a sheet: a grid is easier to hit than a 20-item submenu and is not
-/// disturbed by the periodic refresh.
-private struct GlyphPicker: View {
-    let device: ConnectedDevice
-    let current: DeviceGlyph?
-    let onChoose: (DeviceGlyph?) -> Void
-    @Environment(\.dismiss) private var dismiss
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: Theme.Space.m) {
-            PanelHeading("设置图标")
-            Text(device.name)
-                .font(.system(size: 11.5, weight: .semibold))
-                .lineLimit(1)
-            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 6), count: 4), spacing: 6) {
-                ForEach(DeviceGlyph.allCases, id: \.self) { glyph in
-                    let selected = current == glyph
-                    Button {
-                        onChoose(glyph); dismiss()
-                    } label: {
-                        VStack(spacing: 3) {
-                            Image(systemName: glyph.symbol).font(.system(size: 15, weight: .medium))
-                            Text(glyph.title).font(.system(size: 9.5)).lineLimit(1).minimumScaleFactor(0.8)
-                        }
-                        .foregroundStyle(selected ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(Color.primary))
-                        .frame(maxWidth: .infinity)
-                        .frame(height: 46)
-                        .background(Theme.surface, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-                        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous)
-                            .strokeBorder(selected ? Color.accentColor.opacity(0.6) : Theme.hairline,
-                                          lineWidth: selected ? 1 : 0.5))
-                        .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel(glyph.title)
-                }
-            }
-            HStack {
-                Button("恢复自动识别") { onChoose(nil); dismiss() }
-                    .buttonStyle(.plain)
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(Color.accentColor)
-                Spacer(minLength: 0)
-                Button("完成") { dismiss() }
-                    .buttonStyle(.plain)
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(Theme.inkSecondary)
-                    .keyboardShortcut(.cancelAction)
-            }
-        }
-        .padding(Theme.contentPadding)
-        .frame(width: Theme.compactWidth - 32)
     }
 }

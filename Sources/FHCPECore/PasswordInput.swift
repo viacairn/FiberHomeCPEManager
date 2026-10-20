@@ -2,11 +2,8 @@ import Foundation
 
 /// Client-side password sanity checks.
 ///
-/// Input methods can unintentionally convert ASCII punctuation into full-width forms. macOS
-/// SecureField sends exactly what was typed, so a Chinese IME turning "," into "，" makes
-/// every login attempt fail with result code 4; three attempts then trigger the firmware's
-/// one-minute lockout (result code 2). These checks catch that class of input before a
-/// request is sent, so a typo cannot burn an attempt.
+/// Input methods can convert ASCII punctuation into full-width forms. Validate before
+/// sending credentials so unintended characters do not consume authentication attempts.
 public enum PasswordInputIssue: Equatable, Sendable {
     case empty
     /// A full-width character (for example "，" U+FF0C) was found.

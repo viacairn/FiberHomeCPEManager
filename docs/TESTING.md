@@ -1,138 +1,37 @@
 # 测试流程
 
-两条命令分别验证纯逻辑与真实界面。当前轮次结果见 [完成情况审计](VERIFICATION-2026-10-18.md)。
-
-```bash
-./script/test.sh                      # 单元测试（秒级）
-CPE_PASS='…' ./script/ui_matrix.sh    # 完整 UI 矩阵（单次，约 90 秒）
+```sh
+./script/test.sh
+FHCPE_KEYCHAIN_SMOKE=1 ./script/test.sh
+python3 -m unittest discover -s script -p 'test_*.py'
+python3 script/check_privacy.py --history
 ```
 
-可选环境变量：
+默认测试使用模拟 CPE，不访问真实设备。钥匙串专项使用随机测试服务名与测试密码，完成后删除，不读取用户凭据。
 
-| 变量 | 默认 | 用途 |
-| --- | --- | --- |
-| `CPE_PASS` | 空 | 真机密码。不提供则跳过登录与已连接页检查 |
-| `CPE_HOST` | `192.168.8.1` | 设备地址。用于多设备或离线演练 |
+## 界面
 
-## 1. 单元测试
+`UIRender` 使用合成数据检查页面、号码局部滚动、原生弹窗尺寸、背景扩展及明暗外观。生成图片保留在本地 `render/`。
 
-`script/test.sh` 跑 `swift test`，当前共 **142 项 / 16 个测试套件**，覆盖协议解析、认证失效、菜单栏几何、短信解析与发送合并、密码全角拦截、5 秒同步策略、断线页面清空、零速率、DHCP 保留校验与读回、小区/频段互斥和失败中止。测试使用本地模拟响应，不访问真实 CPE；页面状态测试不操作桌面。
-
-## 2. UI 矩阵
-
-`script/ui_matrix.sh` 是**一次运行、一次汇总**：脚本自己构建探针、按阶段启动应用、逐场景运行，最后打印总数与失败列表，退出码即结果（旧版即使有 FAIL 也返回 0）。
-
-运行前检查探针进程的 macOS 辅助功能授权。没有授权会输出 `BLOCKED` 并返回 **2**，不会重启应用或把无法读取控件误报为产品失败。测试失败返回 **1**，验证通过返回 **0**。本轮环境的该项检查为 BLOCKED，未将真实界面矩阵记为通过。
-
-### 阶段与顺序
-
-| 阶段 | 场景 | 为什么在这个位置 |
-| --- | --- | --- |
-| 1 · 登录页 | `login-empty`、`login-extra`、`login-fullwidth`、`esc`、`cmdw`、`external-click`、`about` | 不需要会话，必须在登录前跑 |
-| 可达性 | `curl http://$CPE_HOST/` | 设备不在本机网段时，登录必然失败；先判定再决定是否跑已连接页 |
-| 2 · 登录 | 真实登录一次 | 只登一次，后续全部复用同一会话 |
-| 3 · 已连接 | `contextmenu`、`styles`、`keys`、`devices-filter-select`、`a11y`、`controls`、`fan-layout`、`sms`、`sms-poll`、`relogin` | 需要在线数据；重新登录放在最后 |
-| 4 · 退出 | `power`、`cmdq` | 会终止进程，因此各自新开实例，必须最后跑 |
-
-### 覆盖对照
-
-| 规范条目 | 场景 | 断言 |
-| --- | --- | --- |
-| §2 空密码拦截 | `login-empty` | 按钮存在、提示出现 |
-| §2 保存密码 / 导入网关 | `login-extra` | 勾选项存在、清空 IP 后能回填 |
-| §2 全角密码拦截 | `login-fullwidth` | 全角逗号提示出现、改为半角后提示消失 |
-| §1 菜单栏两种宽度 | `styles` | 勾选后变宽（30.5 → 92.5 pt）、取消后还原 |
-| §8.2 右键菜单 | `contextmenu` | 退出项、显示网速项、重新登录；不含打开面板/立即刷新 |
-| §8.2 重新登录 | `relogin` | 菜单「重新登录」回到连接页并自动使用已保存凭据 |
-| 关于页 | `about` | 登录页与在线状态均可打开，Esc/返回回到来源页 |
-| §8.2 点击外部关闭 | `external-click` | 面板消失 |
-| §8.2 Esc / ⌘W | `esc`、`cmdw` | 关闭面板、不退出应用；二级页 Esc 返回 |
-| §8.2 ⌘1–⌘4 | `keys` | 四个页签分别落到正确页面 |
-| §3–§7 页面渲染 | `keys` 的落点断言 | 概览「蜂窝信息」、设备「全部」、控制「上行运行模式」、短信「新消息」 |
-| §5 设备筛选 | `devices-filter-select` | 四个常驻选项，切到 5G 后列表与计数同步 |
-| §6 控制页 | `controls` | 模式矩阵、主 SSID、备用通道折叠/展开、重启手风琴 |
-| §6 风扇布局 | `fan-layout` | 打开浮窗，三行标签、且仅一个已选择；关闭浮窗，不写设备 |
-| §7 短信 | `sms` | 列表/详情均无流量·积分胶囊、无快捷芯片、内联回复框存在 |
-| §7 短信 5 秒同步 | `sms-poll` | 进入短信页后 7 秒内同步时间戳发生更新 |
-| §8.4 无障碍 | `a11y` | 六个页面（四页签 + 蜂窝详情 + 会话）内所有按钮/开关/单选必须有名称；滚动条系统控件除外 |
-| §8.2 退出 | `power`、`cmdq` | 右键菜单退出、⌘Q 均能结束进程 |
-| 关于页 | `about` | 右键进入关于、显示隐私说明、返回连接页 |
-| 重新登录 | `relogin` | 右键重新登录，等待受保护读取恢复 |
-
-`a11y` 还带两个防假通过条件：应用未运行直接 FAIL；扫到的页面少于 6 个也 FAIL。
-
-2026-10-18 实跑（设备在线）：**72 passed, 0 failed, 0 skipped（121 秒）**，含 `about`、`relogin`、`fan-mode`、`mobile`、`advanced`。此前三项失败是探针选择器过期（旧「筛选胶囊」「写短信」「回复内容」标签），已改为当前界面的四个常驻筛选、`新消息`、`短信内容`。
-
-`tabs` 场景已删除：它的四个页面落点断言与 `keys` 完全重复，只是多花 5 秒。
-
-### 断线与会话失效
-
-不需要设备，单元测试即可覆盖主要契约：
-
-| 测试套件 | 覆盖 |
-| --- | --- |
-| `PageDataTests` | 断线后 `snapshot` / `devices` 不透过 `isLive` 暴露；晚到数据不能回填 |
-| `ShellSessionTests` | 认证失效 → 清空会话、回到登录页、保留可重登状态 |
-| `EndToEndTests` | 被挤占后受保护读返回 `CPEError.authentication` |
-| `RadioLockTests` / `DHCPReservationTests` | 写入前校验、互斥、失败不重试、回读不一致判 `uncertain` |
-| `SafetyTests` | 登录页 HTML/418 识别；短信正文含 `<html>` 不被误判 |
-
-离屏渲染 `UIRender` 的 `16-offline-devices`、`17-offline-sms`、`18-offline-cellular` 用 fixture 固定断线态，不依赖真机。
-
-### 设备不可达时
-
-```
-device
-  unreachable  http://192.168.8.1/  (不在本机网段，跳过已连接检查)
-login
-  SKIP  设备不可达，跳过登录与已连接页检查
-summary
-  19 passed, 0 failed, 1 skipped  (51s)
+```sh
+swift run UIRender render/light
+swift run UIRender render/dark --dark
+swift run UIRender --chrome-audit --header-audit --header-scroll-audit
+./script/ui_matrix.sh
 ```
 
-这是**跳过**而不是失败：应用本身没有问题，只是这台 Mac 不在设备网段。演练可用 `CPE_HOST=192.0.2.1`（TEST-NET-1）。
+真实鼠标矩阵需要辅助功能授权；未授权返回 `BLOCKED / 2`，不计为通过。默认矩阵不执行真实短信发送和设备写入。
 
-### 真机专项探针
+## 设备验证
 
-这些场景需要 `CPE_PASS`，但不放进默认矩阵（有的会写设备或发短信）：
+真机探针通过环境变量 `CPE_HOST`、`CPE_USER`、`CPE_PASS` 接收参数。测试密码不要写入命令历史或文件。只读检查使用 `FiberHomeCPEManagerProbe --network-audit`；风扇、DHCP 等写入专项须明确选用对应探针，结束后恢复状态。
 
-```bash
-.build/ui_probe devices-filter-select   # 切换 5G 筛选并还原
-.build/ui_probe controls-stable         # 四个开关采样 3 秒，值/可用性不变
-.build/ui_probe controls-toggle         # 关/开指示灯，验证写入与还原
-.build/ui_probe sms-send                # 给 10010 发「流量查询」，验证状态与已发送气泡
-.build/ui_probe sms-poll                # 停留短信页 7 秒，确认同步时间戳更新
-.build/debug/FiberHomeCPEManagerProbe --session-audit   # 两个原生入口：验证客户端会话可并存（会挤掉浏览器会话）
+无操作续期使用 `FiberHomeCPEManagerProbe --keepalive-audit 360`：每 3 秒执行生产环境的受保护采样，每 30 秒检查心跳并续期。至少运行 6 分钟，期间不要在其他入口重新登录；只记录耗时与采样次数，不打印设备信息，也不自动重新登录。
+
+## DMG
+
+```sh
+./script/build_dmg.sh
 ```
 
-以下为本轮融合前的历史实测，不能替代当前构建的界面验收：2026-10-18 的 `controls-stable` 4 个开关 3 秒无变化；`controls-toggle` 写入 1→0→1；`sms-send` 状态「已回复 10010」，会话出现「已发送，流量查询」，设备 `get_sms_data` 回读 29 条；`sms-poll` 的「同步 HH:mm:ss」在 7 秒内更新。本轮没有再次发送短信。
-
-### 无设备的页面渲染
-
-```bash
-export SDKROOT=/Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk
-swift run UIRender render/reliability-final
-swift run UIRender render/reliability-final-dark --dark
-```
-
-每套生成 20 张真实 SwiftUI 组件的夹具截图，包括关于、锁定配置以及设备/短信/控制/蜂窝断线页。渲染验证布局，不代表真实菜单、钥匙串或网络恢复交互已通过。
-
-## 3. 设计约束
-
-* **等待用轮询，不用固定 sleep**。`waitFor(条件, 超时)` 每 40 ms 检查一次，条件满足立即继续；界面快时省时间，慢时也不误判。
-* **登录用全新实例**。场景会反复开关面板，AppKit 的 key window 状态会被打乱，键入可能落到别处；登录前重开一次最稳。
-* **密码用粘贴，不逐字键入**。应用主菜单补了「编辑」菜单后，登录探针把密码写入剪贴板并按 ⌘V；逐字合成 Unicode 时，一个残留的 Command 状态会把密码首字母 Q 变成 ⌘Q（退出）。
-* **启动失败要重试**。应用是沙盒应用，在沙盒 shell 里 `open` 偶尔会在 `libsecinit` 阶段 SIGTRAP（业务代码还没执行）；`relaunch` 最多重试 5 次。
-* **每场景打印耗时**，便于发现回归（例如某次 `styles` 从 2 秒变成 6 秒）。
-* **密码只键入应用自己的密码框**，不落盘、不打印。
-
-## 4. 常见失败怎么读
-
-| 输出 | 含义 |
-| --- | --- |
-| `BLOCKED …辅助功能授权` | 探针进程无法访问桌面控件，矩阵未执行；需要在系统设置中允许运行探针的宿主访问辅助功能 |
-| `设备不可达` + 大量 SKIP | 网络问题，先确认 Mac 在 CPE 网段 |
-| `The Internet connection appears to be offline` | macOS 本地网络权限被拒；在系统设置 → 隐私与安全性 → 本地网络允许 FiberHomeCPEManager |
-| `FAIL UI 登录` 且 `page texts` 含 `用户名或密码错误` | 固件拒绝了凭据；连续错误会触发 1 分钟锁定 |
-| `FAIL …tab…` 成片出现 | 通常是应用没登录（看 `UI 登录` 一行） |
-| 单个场景偶发失败 | 重跑该场景：`.build/ui_probe <scenario>` |
+脚本执行源码和 Git 对象脱敏检查，构建 arm64 Release，验证签名，再挂载 DMG 检查实际包内文件、架构和二进制字符串。可传入仓库外的 `--private-plan` 做精确测试信息检查。

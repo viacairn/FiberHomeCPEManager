@@ -95,51 +95,53 @@ public struct ConnectedDevice: Identifiable, Sendable, Codable, Equatable {
     public var onlineSeconds: TimeInterval?
     public enum Icon: Sendable {
         case laptop, phone, tablet, tv, gamepad, desktop, unknown
-        // Appliances the panel actually sees on this network.
+        // General appliance categories; users can also choose an icon manually.
         case vacuum, washer, camera, airConditioner, hood, heater, watch
     }
-    /// Icon inference.
-    ///
-    /// Hostname keywords win over `deviceType`, because this firmware reports `Phone` for
-    /// cameras and air conditioners — letting the reported type win made every appliance
-    /// render as a phone.
+    /// Infer only from explicit categories or recognizable product families. Manufacturer
+    /// names and MAC addresses do not identify a category. Name clues take priority because
+    /// some firmware reports appliances as `Phone`.
     public var icon: Icon {
-        // Search both fields: the firmware sometimes reports a generic hostname while the
-        // display name carries the meaningful model string.
-        let n = (name + " " + (hostname ?? "")).lowercased()
+        Self.inferredIcon(in: [name, hostname ?? ""])
+            ?? Self.inferredIcon(in: [deviceType ?? ""])
+            ?? .unknown
+    }
 
-        // Roborock H1 / H1 Air / WM series are washer-dryers, not robot vacuums.
-        if n.contains("roborock-wm") || n.contains("-wm-") || n.contains("h1-air")
-            || n.contains("h1 air") || n.contains("washer") || n.contains("洗衣") {
-            return .washer
+    private static func inferredIcon(in values: [String]) -> Icon? {
+        let lowercased = values.map { $0.lowercased() }
+        let words = lowercased.map { value in
+            value.split { !$0.isLetter && !$0.isNumber }.map(String.init)
         }
-        if n.contains("roborock") || n.contains("robot") || n.contains("vacuum") || n.contains("扫地") { return .vacuum }
-        if n.contains("camera") || n.contains("cam-") || n.contains("摄像") { return .camera }
-        if n.contains("airconditioner") || n.contains("air-conditioner") || n.contains("aircon")
-            || n.contains("空调") { return .airConditioner }
-        if n.contains("rangehood") || n.contains("hood") || n.contains("烟机") { return .hood }
-        if n.contains("heater") || n.contains("热水器") || n.contains("waterheater") { return .heater }
-        if n.contains("watch") || n.contains("手表") { return .watch }
-        if n.contains("iphone") || n.contains("手机") { return .phone }
-        if n.contains("ipad") || n.contains("平板") { return .tablet }
-        if n.contains("macbook") || n.contains("laptop") || n.contains("笔记本") { return .laptop }
-        // Matches "Mac", "Mac-mini", "iMac"; "MacBook" was handled above.
-        if n.contains("mac") || n.contains("desktop") || n.contains("电脑") { return .desktop }
-        if n.contains("tv") || n.contains("电视") { return .tv }
-        if n.contains("switch") || n.contains("playstation") || n.contains("xbox") || n.contains("游戏") { return .gamepad }
-        if n.contains("phone") || n.contains("mobile") { return .phone }
-        if n.contains("pad") { return .tablet }
+        // Keep the fields separate, and require whole words/phrases for English clues.
+        let phrases = words.map { " " + $0.joined(separator: " ") + " " }
+        func has(_ terms: String...) -> Bool {
+            terms.contains { term in phrases.contains { $0.contains(" " + term + " ") } }
+        }
+        func hasChinese(_ terms: String...) -> Bool {
+            terms.contains { term in lowercased.contains { $0.contains(term) } }
+        }
+        func hasProduct(_ family: String) -> Bool {
+            words.joined().contains { word in
+                word == family || (word.hasPrefix(family) && word.dropFirst(family.count).first?.isNumber == true)
+            }
+        }
 
-        // Fall back to what the firmware claims.
-        if let type = deviceType?.lowercased() {
-            if type.contains("phone") || type.contains("mobile") { return .phone }
-            if type.contains("tablet") || type.contains("pad") { return .tablet }
-            if type.contains("tv") { return .tv }
-            if type.contains("game") || type.contains("console") { return .gamepad }
-            if type.contains("laptop") || type.contains("macbook") { return .laptop }
-            if type.contains("desktop") || type.contains("pc") { return .desktop }
-        }
-        return .unknown
+        if has("washer", "washing machine", "washingmachine") || hasChinese("洗衣") { return .washer }
+        if has("vacuum", "robotvacuum", "robot vacuum") || hasChinese("扫地") { return .vacuum }
+        if has("camera", "ipcamera", "ip camera", "webcam") || hasChinese("摄像") { return .camera }
+        if has("airconditioner", "air conditioner", "aircon") || hasChinese("空调") { return .airConditioner }
+        if has("rangehood", "range hood", "cooker hood", "kitchen hood") || hasChinese("油烟机", "烟机") { return .hood }
+        if has("heater", "waterheater", "water heater", "tanklessheater", "tankless heater") || hasChinese("热水器") { return .heater }
+        if has("watch", "smartwatch", "applewatch", "apple watch") || hasChinese("手表") { return .watch }
+        if hasProduct("iphone") || has("phone", "smartphone", "cellphone", "cell phone", "mobilephone", "mobile phone") || hasChinese("手机") { return .phone }
+        if hasProduct("ipad") || has("tablet") || hasChinese("平板") { return .tablet }
+        if hasProduct("macbook") || has("macbookpro", "macbookair", "laptop", "notebook") || hasChinese("笔记本") { return .laptop }
+        if hasProduct("imac") || has("mac mini", "mac pro", "mac studio", "macmini", "macpro", "macstudio", "desktop", "pc", "computer") || hasChinese("电脑") { return .desktop }
+        if has("tv", "television", "smarttv", "smart tv", "appletv", "apple tv") || hasChinese("电视") { return .tv }
+        if hasProduct("playstation") || hasProduct("xbox")
+            || has("xboxone", "xboxseriesx", "xboxseriess", "nintendo switch", "gameconsole", "game console", "gamepad", "gamecontroller")
+            || hasChinese("游戏机") { return .gamepad }
+        return nil
     }
 
     public var systemSymbol: String {

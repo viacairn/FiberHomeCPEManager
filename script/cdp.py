@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
-"""Minimal DevTools-protocol client for the read-only field capture workflow.
+"""Device-scoped CDP client for protocol inspection.
 
-The user logs in manually in the Chrome window this project launches. After that, this
-script connects to the page target and evaluates *read-only* expressions in the console
-context, so no credentials are ever typed, read or stored by the agent. Nothing is sent
-to the device except the requests the page itself makes.
+Selects the actual device tab on a live localhost/127.0.0.1 endpoint (9222/9223).
+It does not log evaluation arguments, log in automatically, or replay failed requests.
+Evaluation can perform explicit caller-authorized audits; return only non-secret results.
 
 Usage:
     python3 script/cdp.py tabs
     python3 script/cdp.py eval "<expression>"
-    python3 script/cdp.py navigate <url>
+    python3 script/cdp.py navigate <device-url>
 """
 import json
 import subprocess
@@ -18,41 +17,59 @@ import urllib.request
 from urllib.parse import urlparse
 
 import os
+from pathlib import Path
+from shutil import which
 
 
-def _pick_port():
-    """CDP_PORT wins; otherwise the first of 9222/9223 that serves /json/list.
-
-    Chrome's chrome://inspect remote-debugging mode has no HTTP /json endpoint, so a
-    port that answers with an empty body is skipped.
-    """
-    if os.environ.get("CDP_PORT"):
-        return int(os.environ["CDP_PORT"])
-    for port in (9222, 9223):
-        try:
-            with urllib.request.urlopen(f"http://localhost:{port}/json/list", timeout=2) as r:
-                if json.loads(r.read().decode()):
-                    return port
-        except Exception:
-            continue
-    return 9222
+DEVICE_HOST = os.environ.get("CPE_HOST", "192.168.8.1")
+BASE = None
 
 
-PORT = _pick_port()
-BASE = f"http://localhost:{PORT}"
+def is_device_target(target):
+    return target.get("type") == "page" and urlparse(target.get("url", "")).hostname == DEVICE_HOST \
+        and not urlparse(target.get("url", "")).path.startswith("/fh_api/")
+
+
+def _pick_endpoint():
+    configured = os.environ.get("CDP_PORT")
+    try:
+        ports = [int(configured)] if configured else [9222, 9223]
+    except ValueError:
+        raise SystemExit("CDP_PORT must be a valid TCP port")
+    if any(not 1 <= port <= 65535 for port in ports):
+        raise SystemExit("CDP_PORT must be between 1 and 65535")
+    hosts = [os.environ["CDP_HOST"]] if os.environ.get("CDP_HOST") else ["127.0.0.1", "localhost"]
+    for port in ports:
+        for host in hosts:
+            base = f"http://{host}:{port}"
+            try:
+                with urllib.request.urlopen(base + "/json/list", timeout=2) as response:
+                    targets = json.loads(response.read().decode())
+                if isinstance(targets, list) and any(is_device_target(t) for t in targets if isinstance(t, dict)):
+                    return base
+            except (OSError, ValueError):
+                continue
+    raise SystemExit("CDP unavailable: no device tab on 127.0.0.1/localhost:9222 or 9223; no request sent")
 
 
 def http_json(path):
-    with urllib.request.urlopen(BASE + path, timeout=5) as response:
-        return json.loads(response.read().decode())
+    global BASE
+    if BASE is None:
+        BASE = _pick_endpoint()
+    try:
+        with urllib.request.urlopen(BASE + path, timeout=5) as response:
+            return json.loads(response.read().decode())
+    except (OSError, ValueError):
+        raise SystemExit("CDP endpoint disconnected; no request replayed") from None
 
 
 def page_target():
-    for target in http_json("/json/list"):
-        if target.get("type") == "page" and "192.168.8.1" in target.get("url", "") \
-                and "fh_api" not in target.get("url", ""):
-            return target
-    raise SystemExit("no page target found")
+    targets = http_json("/json/list")
+    if isinstance(targets, list):
+        for target in targets:
+            if isinstance(target, dict) and is_device_target(target):
+                return target
+    raise SystemExit("no device page target found")
 
 
 def run_cdp(ws_url, calls):
@@ -84,10 +101,14 @@ function send() {
 }
 ws.onerror = (error) => { console.error("WS_ERROR", String(error.message ?? error)); process.exit(1); };
 """
-    completed = subprocess.run(
-        [node, "-e", script, ws_url, json.dumps(calls)],
-        capture_output=True, text=True, timeout=60,
-    )
+    try:
+        completed = subprocess.run(
+            [node, "-e", script, ws_url, json.dumps(calls)],
+            capture_output=True, text=True, timeout=60,
+        )
+    except subprocess.TimeoutExpired:
+        # TimeoutExpired includes the complete command, which can include credentials.
+        raise SystemExit("CDP request timed out; no request replayed") from None
     if completed.returncode != 0:
         raise SystemExit(completed.stderr.strip() or "cdp call failed")
     return json.loads(completed.stdout.strip().splitlines()[-1])
@@ -95,9 +116,13 @@ ws.onerror = (error) => { console.error("WS_ERROR", String(error.message ?? erro
 
 def _node_path():
     candidates = [
-        "/Users/developer/.dsh/dsh-runtimes/dsh-primary-runtime/dependencies/node/bin/node",
+        os.environ.get("CPE_NODE_PATH"),
+        which("node"),
+        str(Path.home() / ".dsh/dsh-runtimes/dsh-primary-runtime/dependencies/node/bin/node"),
     ]
     for path in candidates:
+        if not path:
+            continue
         try:
             subprocess.run([path, "--version"], capture_output=True, check=True, timeout=5)
             return path
@@ -122,7 +147,7 @@ def main(argv):
     command = argv[1]
     if command == "tabs":
         for target in http_json("/json/list"):
-            if target.get("type") == "page":
+            if is_device_target(target):
                 print(f"{target['url']}\n  {target['webSocketDebuggerUrl']}")
         return 0
     if command == "eval":
@@ -132,7 +157,7 @@ def main(argv):
     if command == "navigate":
         url = argv[2]
         parsed = urlparse(url)
-        if parsed.hostname != "192.168.8.1":
+        if parsed.hostname != DEVICE_HOST:
             raise SystemExit("refusing to navigate away from the device origin")
         target = page_target()
         run_cdp(target["webSocketDebuggerUrl"], [{

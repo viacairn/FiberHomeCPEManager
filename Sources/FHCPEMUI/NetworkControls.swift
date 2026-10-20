@@ -7,6 +7,26 @@ struct MobileNetworkSection: View {
     let onSetAirplane: (Bool) -> Void
     let onSetCellular: (Bool) -> Void
     let onSaveAntenna: (Bool, AntennaType) -> Void
+    @State private var antennaMenuOpen = false
+
+    private enum AntennaOption: Hashable {
+        case off
+        case mode(AntennaType)
+
+        var title: String {
+            switch self {
+            case .off: "关闭"
+            case .mode(let type): type.title
+            }
+        }
+    }
+
+    private static let antennaOptions: [AntennaOption] = [
+        .off,
+        .mode(.automatic),
+        .mode(.n41),
+        .mode(.n78n77)
+    ]
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -24,28 +44,7 @@ struct MobileNetworkSection: View {
                             .font(Theme.footnote).foregroundStyle(Theme.inkMuted)
                     }
                     separator
-                    switchRow("5G NR 外置天线", symbol: "dot.radiowaves.left.and.right",
-                              value: state.antennaEnabled, enabled: !busy) {
-                        onSaveAntenna($0, state.antennaType ?? .automatic)
-                    }
-                    if state.antennaEnabled {
-                        HStack {
-                            Text("天线类型").font(Theme.label).foregroundStyle(Theme.inkSecondary)
-                            Spacer(minLength: 0)
-                            Picker("天线类型", selection: Binding(
-                                get: { state.antennaType },
-                                set: { if let type = $0 { onSaveAntenna(true, type) } }
-                            )) {
-                                if state.antennaType == nil { Text("—").tag(nil as AntennaType?) }
-                                ForEach(AntennaType.allCases, id: \.self) { type in
-                                    Text(type.title).tag(Optional(type))
-                                }
-                            }
-                            .labelsHidden().pickerStyle(.menu).controlSize(.small)
-                            .fixedSize().disabled(busy)
-                            .accessibilityLabel("外置天线类型")
-                        }
-                    }
+                    antennaRow(state: state)
                 } else {
                     ForEach(["飞行模式", "蜂窝数据", "5G NR 外置天线"], id: \.self) { title in
                         HStack {
@@ -57,9 +56,86 @@ struct MobileNetworkSection: View {
                 }
             }
         }
+        .onChange(of: busy) { _, busy in
+            if busy { antennaMenuOpen = false }
+        }
+        .onChange(of: state) { _, _ in antennaMenuOpen = false }
+        .onDisappear { antennaMenuOpen = false }
     }
 
     private var separator: some View { Rectangle().fill(Theme.hairline).frame(height: 0.5) }
+
+    private func selectedAntennaOption(for state: MobileNetworkState) -> AntennaOption? {
+        guard state.antennaEnabled else { return .off }
+        guard let type = state.antennaType else { return nil }
+        return .mode(type)
+    }
+
+    private func antennaRow(state: MobileNetworkState) -> some View {
+        let current = selectedAntennaOption(for: state)
+        return HStack(spacing: 6) {
+            Image(systemName: "dot.radiowaves.left.and.right")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(Theme.inkSecondary)
+                .frame(width: 16)
+            Text("5G NR 外置天线")
+                .font(.system(size: 11.5, weight: .semibold))
+            Spacer(minLength: 0)
+            Button {
+                guard !busy else { return }
+                antennaMenuOpen.toggle()
+            } label: {
+                HStack(spacing: 5) {
+                    Text(current?.title ?? "—")
+                        .font(.system(size: 11, weight: .medium))
+                        .lineLimit(1)
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 8, weight: .semibold))
+                        .foregroundStyle(Theme.inkSecondary)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .fixedSize()
+            .disabled(busy)
+            .popover(isPresented: $antennaMenuOpen, arrowEdge: .bottom) {
+                VStack(spacing: 2) {
+                    ForEach(Self.antennaOptions, id: \.self) { option in
+                        Button {
+                            antennaMenuOpen = false
+                            guard !busy, current != option else { return }
+                            switch option {
+                            case .off:
+                                onSaveAntenna(false, state.antennaType ?? .automatic)
+                            case .mode(let type):
+                                onSaveAntenna(true, type)
+                            }
+                        } label: {
+                            HStack(spacing: 6) {
+                                Text(option.title).font(.system(size: 11))
+                                Spacer(minLength: 0)
+                                if current == option {
+                                    Image(systemName: "checkmark")
+                                        .font(.system(size: 9, weight: .bold))
+                                        .foregroundStyle(Color.accentColor)
+                                        .accessibilityHidden(true)
+                                }
+                            }
+                            .padding(.horizontal, 8)
+                            .frame(width: 116, height: 24)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(busy)
+                        .accessibilityValue(current == option ? "已选择" : "")
+                    }
+                }
+                .padding(6)
+            }
+            .accessibilityLabel("5G NR 外置天线：\(current?.title ?? "—")")
+        }
+        .frame(height: Theme.inlineControlRowHeight)
+    }
 
     private func switchRow(_ title: String, symbol: String, value: Bool, enabled: Bool,
                            action: @escaping (Bool) -> Void) -> some View {
@@ -68,10 +144,11 @@ struct MobileNetworkSection: View {
                 .foregroundStyle(Theme.inkSecondary).frame(width: 16)
             Text(title).font(.system(size: 11.5, weight: .semibold))
             Spacer(minLength: 0)
-            Toggle(title, isOn: Binding(get: { value }, set: action))
+            Toggle(title, isOn: Binding(get: { value }, set: { action($0) }))
                 .labelsHidden().toggleStyle(.switch).controlSize(.mini)
                 .disabled(!enabled).accessibilityLabel(title)
         }
+        .frame(height: Theme.inlineControlRowHeight)
     }
 }
 

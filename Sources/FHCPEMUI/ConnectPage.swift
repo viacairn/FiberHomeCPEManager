@@ -23,34 +23,40 @@ public struct ConnectPage: View {
     }
 
     @FocusState private var focus: ConnectionField?
+    @Environment(\.appNotices) private var notices
 
     /// A greyed-out button reads as "broken" rather than "password required". The button
     /// stays enabled and, when the password is missing, moves focus there and says why.
     ///
-    /// Full-width punctuation is blocked before any request: a Chinese IME turning the
-    /// input into full-width forms can consume authentication attempts and trigger
-    /// the firmware's one-minute lockout.
+    /// Reject full-width input before a request so input-method conversion does not
+    /// consume a device authentication attempt.
     private func submit() {
-        if let issue = PasswordInput.issue(in: password) {
+        if rejectedPasswordInput {
             focus = .password
-            emptyPasswordHint = (issue == .empty)
-            showPasswordIssue = (issue != .empty)
+            notices?.show("已阻止全角字符，请使用西文半角重新输入", tone: .error)
             return
         }
-        emptyPasswordHint = false
-        showPasswordIssue = false
+        if let issue = PasswordInput.issue(in: password) {
+            focus = .password
+            showPasswordIssue(issue)
+            return
+        }
         onConnect()
     }
 
-    @State private var emptyPasswordHint = false
-    @State private var showPasswordIssue = false
     @State private var revealPassword = false
+    @State private var rejectedPasswordInput = false
 
-    /// Show full-width warnings as soon as they are typed; other issues appear on submit.
-    private var visiblePasswordIssue: PasswordInputIssue? {
-        guard let issue = PasswordInput.issue(in: password) else { return nil }
-        if case .fullWidth = issue { return issue }
-        return showPasswordIssue && issue != .empty ? issue : nil
+    private func showPasswordIssue(_ issue: PasswordInputIssue) {
+        if case .fullWidth = issue {
+            notices?.show(issue.message, tone: .error, actionTitle: "改为半角") {
+                password = PasswordInput.halfWidth(password)
+                rejectedPasswordInput = false
+                focus = .password
+            }
+        } else {
+            notices?.show(issue.message, tone: .error)
+        }
     }
 
     /// Strips `http://`, any path, and whitespace so the field only ever holds a host.
@@ -61,12 +67,6 @@ public struct ConnectPage: View {
         }
         if let slash = value.firstIndex(of: "/") { value = String(value[..<slash]) }
         return value
-    }
-
-    private var statusLine: String? {
-        if let error { return error }
-        if emptyPasswordHint { return "请输入密码后再连接" }
-        return nil
     }
 
     public var body: some View {
@@ -125,9 +125,22 @@ public struct ConnectPage: View {
                             .accessibilityLabel("保存密码")
                         }
                         ZStack(alignment: .trailing) {
-                            GlassField(text: $password, placeholder: "请输入管理员密码",
-                                       secure: !revealPassword, focus: $focus, tag: .password)
-                                .onSubmit { submit() }
+                            LoginPasswordField(text: $password, secure: !revealPassword, focus: $focus,
+                                               onSubmit: submit,
+                                               onRejectedInput: {
+                                                   rejectedPasswordInput = true
+                                                   notices?.show("已阻止全角字符，请使用西文半角重新输入", tone: .error)
+                                               },
+                                               onAcceptedInput: { rejectedPasswordInput = false })
+                                .padding(.leading, 10)
+                                .padding(.trailing, 34)
+                                .frame(height: 28)
+                                .background(Theme.surface, in: CapsulePanelShape(maxRadius: 999))
+                                .overlay(
+                                    CapsulePanelShape(maxRadius: 999)
+                                        .strokeBorder(focus == .password ? Color.accentColor.opacity(0.65) : Theme.hairline,
+                                                      lineWidth: focus == .password ? 1 : 0.5)
+                                )
                             Button {
                                 revealPassword.toggle()
                             } label: {
@@ -140,28 +153,6 @@ public struct ConnectPage: View {
                             .buttonStyle(.plain)
                             .padding(.trailing, 3)
                             .accessibilityLabel(revealPassword ? "隐藏密码" : "显示密码")
-                        }
-                        if let issue = visiblePasswordIssue {
-                            HStack(alignment: .firstTextBaseline, spacing: 5) {
-                                Image(systemName: "exclamationmark.circle")
-                                    .font(.system(size: 9.5))
-                                Text(issue.message)
-                                    .font(.system(size: 9.5))
-                                    .fixedSize(horizontal: false, vertical: true)
-                                Spacer(minLength: 0)
-                                if case .fullWidth = issue {
-                                    Button("改为半角") {
-                                        password = PasswordInput.halfWidth(password)
-                                        showPasswordIssue = false
-                                        focus = .password
-                                    }
-                                    .buttonStyle(.plain)
-                                    .font(.system(size: 9.5, weight: .medium))
-                                    .foregroundStyle(.tint)
-                                    .accessibilityLabel("把密码中的全角字符改为半角")
-                                }
-                            }
-                            .foregroundStyle(Theme.negative)
                         }
                     }
 
@@ -177,19 +168,6 @@ public struct ConnectPage: View {
                     .keyboardShortcut(.defaultAction)
                 }
 
-                if let statusLine {
-                    HStack(spacing: 5) {
-                        Image(systemName: "exclamationmark.circle")
-                            .font(.system(size: 9.5))
-                        Text(statusLine)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .multilineTextAlignment(.leading)
-                    }
-                        .font(.system(size: 10))
-                        .foregroundStyle(Theme.negative)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .textSelection(.enabled)
-                }
             }
             .padding(.horizontal, Theme.contentPadding)
 
@@ -199,9 +177,9 @@ public struct ConnectPage: View {
         .onChange(of: error) { _, newValue in
             if newValue != nil { focus = .password }
         }
-        .onChange(of: password) { _, newValue in
-            if showPasswordIssue { showPasswordIssue = false }
-            if !newValue.isEmpty { emptyPasswordHint = false }
+        .onChange(of: password) { _, value in
+            if case .fullWidth = PasswordInput.issue(in: value),
+               let issue = PasswordInput.issue(in: value) { showPasswordIssue(issue) }
         }
     }
 

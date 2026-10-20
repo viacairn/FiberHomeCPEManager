@@ -22,6 +22,8 @@ public actor DeviceSession {
     private lazy var ddnsService = DDNSService(rpc: transport)
     private lazy var portMappingService = PortMappingService(rpc: transport)
     private var refreshing = false
+    private var lastHeartbeatAt: TimeInterval?
+    private var supportsHeartbeat = true
     private var receiveCounter = TrafficCounter()
     private var sendCounter = TrafficCounter()
     public init(address: DeviceAddress) {
@@ -42,6 +44,16 @@ public actor DeviceSession {
     /// Reads the snapshot and derives bit-per-second rates from byte-counter deltas.
     /// The first sample after connect has no delta yet, so rates stay nil ("—").
     private func sample() async throws -> SessionReading {
+        if supportsHeartbeat, SessionRefreshPolicy.heartbeatIsDue(last: lastHeartbeatAt, now: ProcessInfo.processInfo.systemUptime) {
+            do {
+                try await transport.keepAlive()
+                lastHeartbeatAt = ProcessInfo.processInfo.systemUptime
+            } catch CPEError.http(let status) where [400, 404, 405, 501].contains(status) {
+                // An optional endpoint missing on another firmware must not prevent
+                // login. The protected reads below still have to prove authentication.
+                supportsHeartbeat = false
+            }
+        }
         var value = try await adapter.snapshot()
         let devices = try await adapter.devices()
         value.devicesKnown = true

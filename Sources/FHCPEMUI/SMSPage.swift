@@ -169,11 +169,6 @@ public struct SMSPage: View {
                 .scrollIndicators(.automatic)
             }
 
-            if let status {
-                StatusBanner(text: status, tone: statusIsError ? .error : .success)
-                    .padding(.horizontal, Theme.contentPadding)
-                    .padding(.bottom, 6)
-            }
         }
     }
 
@@ -265,100 +260,40 @@ public struct SMSPage: View {
                     }
                 }
                 .scrollIndicators(.automatic)
-                .onAppear {
-                    scrollToBottom(proxy)
+                .scrollClipDisabled(false)
+                .modifier(MessageInitialScrollAnchor())
+                .safeAreaInset(edge: .bottom, spacing: 0) {
+                    imInputBar
+                        .fixedSize(horizontal: false, vertical: true)
                 }
-                .onChange(of: activeThread?.messages.count) { _, _ in
-                    scrollToBottom(proxy)
-                }
-                .onChange(of: activeThread?.id) { _, _ in
+                .task(id: activeThread.map { "\($0.id):\($0.messages.last?.id ?? "")" }) {
+                    // The first LazyVStack layout must include the last timestamp before
+                    // a programmatic scroll. A cancelled conversation must not scroll later.
+                    await Task.yield()
+                    guard !Task.isCancelled else { return }
                     scrollToBottom(proxy)
                 }
             }
             .frame(maxHeight: .infinity)
-
-            imInputBar
-
-            if let status {
-                StatusBanner(text: status, tone: statusIsError ? .error : .success)
-                    .padding(.horizontal, Theme.contentPadding)
-                    .padding(.bottom, 4)
-            }
         }
     }
 
     /// Top bar of the IM window: shows the contact number when viewing a thread, or an inline
     /// recipient input capsule when starting a new conversation.
     private var imHeaderBar: some View {
-        let pill = CapsulePanelShape(maxRadius: 999)
-        return VStack(spacing: 6) {
-            HStack(spacing: 8) {
-                Button(action: onBack) {
-                    HStack(spacing: 4) {
-                        Image(systemName: "chevron.left")
-                            .font(.system(size: 11, weight: .semibold))
-                        Text("会话")
-                            .font(.system(size: 11.5, weight: .semibold))
-                    }
-                    .foregroundStyle(.primary)
-                    .padding(.horizontal, 10)
-                    .frame(height: 28)
-                    .background(Theme.panelFill, in: pill)
-                    .overlay(pill.strokeBorder(Theme.hairlineStrong, lineWidth: 0.75))
-                    .contentShape(pill)
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("返回短信会话列表")
-
+        VStack(spacing: 6) {
+            Group {
                 if let selectedThread {
-                    VStack(spacing: 1) {
-                        Text(selectedThread.phone)
-                            .font(.system(size: 13, weight: .bold))
-                            .foregroundStyle(.primary)
-                            .lineLimit(1)
-                        Text("共 \(selectedThread.messages.count) 条消息")
-                            .font(.system(size: 9.5, weight: .medium))
-                            .foregroundStyle(Theme.inkSecondary)
+                    SymmetricSMSHeaderLayout(spacing: 8, maximumCenterWidth: 220) {
+                        imBackButton
+                        imThreadTitle(selectedThread)
+                        imReloadButton
                     }
-                    .frame(maxWidth: .infinity)
-
-                    Button(action: onReload) {
-                        Image(systemName: "arrow.clockwise")
-                            .font(.system(size: 11.5, weight: .semibold))
-                            .foregroundStyle(Theme.inkSecondary)
-                            .frame(width: 28, height: 28)
-                            .background(Theme.panelFill, in: pill)
-                            .overlay(pill.strokeBorder(Theme.hairlineStrong, lineWidth: 0.75))
-                            .contentShape(pill)
-                    }
-                    .buttonStyle(.plain)
-                    .help("同步最新短信")
-                    .accessibilityLabel("同步最新短信")
                 } else {
-                    HStack(spacing: 6) {
-                        Text("收件人:")
-                            .font(.system(size: 10.5, weight: .semibold))
-                            .foregroundStyle(Theme.inkSecondary)
-                        TextField("输入号码，例如 10010", text: $draftNumber)
-                            .textFieldStyle(.plain)
-                            .font(.system(size: 12, weight: .semibold).monospacedDigit())
-                            .foregroundStyle(.primary)
-                            .accessibilityLabel("接收号码")
-                        if !draftNumber.isEmpty {
-                            Button { draftNumber = "" } label: {
-                                Image(systemName: "xmark.circle.fill")
-                                    .font(.system(size: 10.5))
-                                    .foregroundStyle(Theme.inkMuted)
-                            }
-                            .buttonStyle(.plain)
-                            .accessibilityLabel("清除接收号码")
-                        }
+                    HStack(spacing: 8) {
+                        imBackButton
+                        imRecipientInput.frame(maxWidth: .infinity)
                     }
-                    .padding(.horizontal, 10)
-                    .frame(height: 28)
-                    .frame(maxWidth: .infinity)
-                    .background(Theme.panelFill, in: pill)
-                    .overlay(pill.strokeBorder(Color.accentColor.opacity(0.42), lineWidth: 0.85))
                 }
             }
             .padding(.horizontal, Theme.contentPadding)
@@ -369,6 +304,100 @@ public struct SMSPage: View {
                 .frame(height: 0.5)
                 .padding(.horizontal, Theme.contentPadding)
         }
+    }
+
+    private var imBackButton: some View {
+        let pill = CapsulePanelShape(maxRadius: 999)
+        return Button(action: onBack) {
+            HStack(spacing: 4) {
+                Image(systemName: "chevron.left")
+                    .font(.system(size: 11, weight: .semibold))
+                Text("会话")
+                    .font(.system(size: 11.5, weight: .semibold))
+            }
+            .foregroundStyle(.primary)
+            .padding(.horizontal, 10)
+            .frame(height: 28)
+            .background(Theme.panelFill, in: pill)
+            .overlay(pill.strokeBorder(Theme.hairlineStrong, lineWidth: 0.75))
+            .contentShape(pill)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("返回短信会话列表")
+    }
+
+    private var imReloadButton: some View {
+        let pill = CapsulePanelShape(maxRadius: 999)
+        return Button(action: onReload) {
+            Image(systemName: "arrow.clockwise")
+                .font(.system(size: 11.5, weight: .semibold))
+                .foregroundStyle(Theme.inkSecondary)
+                .frame(width: 28, height: 28)
+                .background(Theme.panelFill, in: pill)
+                .overlay(pill.strokeBorder(Theme.hairlineStrong, lineWidth: 0.75))
+                .contentShape(pill)
+        }
+        .buttonStyle(.plain)
+        .help("同步最新短信")
+        .accessibilityLabel("同步最新短信")
+    }
+
+    private func imThreadTitle(_ thread: SMSThread) -> some View {
+        VStack(spacing: 1) {
+            ViewThatFits(in: .horizontal) {
+                imPhoneText(thread.phone)
+                OverflowPhoneTitle(phone: thread.phone)
+                .frame(height: 16)
+                .accessibilityIdentifier("sms.phoneOverflow")
+                .id(thread.id)
+            }
+            .frame(maxWidth: .infinity)
+            .frame(height: 16)
+            Text("共 \(thread.messages.count) 条消息")
+                .font(.system(size: 9.5, weight: .medium))
+                .foregroundStyle(Theme.inkSecondary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
+        }
+    }
+
+    private func imPhoneText(_ phone: String) -> some View {
+        Text(phone)
+            .font(.system(size: 13, weight: .bold))
+            .foregroundStyle(.primary)
+            .lineLimit(1)
+            .fixedSize(horizontal: true, vertical: false)
+    }
+
+    private var imRecipientInput: some View {
+        let pill = CapsulePanelShape(maxRadius: 999)
+        return SymmetricSMSHeaderLayout(spacing: 6) {
+            Text("收件人:")
+                .font(.system(size: 10.5, weight: .semibold))
+                .foregroundStyle(Theme.inkSecondary)
+            TextField("输入号码，例如 10010", text: $draftNumber)
+                .textFieldStyle(.plain)
+                .font(.system(size: 12, weight: .semibold).monospacedDigit())
+                .foregroundStyle(.primary)
+                .multilineTextAlignment(.center)
+                .accessibilityLabel("接收号码")
+            if !draftNumber.isEmpty {
+                Button { draftNumber = "" } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(Theme.inkMuted)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("清除接收号码")
+            } else {
+                Color.clear.frame(width: 0, height: 0)
+                    .accessibilityHidden(true)
+            }
+        }
+        .padding(.horizontal, 10)
+        .frame(height: 28)
+        .background(Theme.panelFill, in: pill)
+        .overlay(pill.strokeBorder(Color.accentColor.opacity(0.42), lineWidth: 0.85))
     }
 
     private var imEmptyConversationState: some View {
@@ -445,7 +474,7 @@ public struct SMSPage: View {
         }
         .padding(.horizontal, Theme.contentPadding)
         .padding(.top, 4)
-        .padding(.bottom, 6)
+        .padding(.bottom, 4)
     }
 
     private func submitIMMessage() {
@@ -477,12 +506,13 @@ public struct SMSPage: View {
                     .font(.system(size: 11.5, weight: .regular))
                     .lineSpacing(2.5)
                     .multilineTextAlignment(.leading)
+                    .fixedSize(horizontal: false, vertical: true)
                     .textSelection(.enabled)
                     .padding(.horizontal, 11)
                     .padding(.vertical, 8)
                     .background(
                         bubbleShape
-                            .fill(message.isSent ? Color.accentColor : Color.white.opacity(0.95))
+                            .fill(message.isSent ? Color.accentColor : Theme.surface)
                     )
                     .overlay(
                         bubbleShape
@@ -499,10 +529,13 @@ public struct SMSPage: View {
                     Text(shortTime(message.date))
                         .font(.system(size: 9.5, weight: .medium).monospacedDigit())
                         .foregroundStyle(Theme.inkSecondary)
+                        .lineLimit(1)
                 }
+                .fixedSize(horizontal: false, vertical: true)
             }
             if !message.isSent { Spacer(minLength: 38) }
         }
+        .fixedSize(horizontal: false, vertical: true)
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(message.isSent ? "已发送" : "已接收")，\(message.body)")
     }
@@ -555,4 +588,53 @@ public struct SMSPage: View {
         formatter.dateFormat = "yyyy/MM/dd"
         return formatter
     }()
+}
+
+/// Keeps the middle view at the page's center while preserving each control's natural
+/// size. The wider side determines both reserved wings, including for recipient entry.
+private struct SymmetricSMSHeaderLayout: Layout {
+    var spacing: CGFloat
+    var maximumCenterWidth: CGFloat = .infinity
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        guard subviews.count == 3 else { return .zero }
+        let leading = subviews[0].sizeThatFits(.unspecified)
+        let trailing = subviews[2].sizeThatFits(.unspecified)
+        let sideWidth = max(leading.width, trailing.width)
+        let idealCenter = subviews[1].sizeThatFits(.unspecified)
+        let idealWidth = 2 * (sideWidth + spacing) + min(maximumCenterWidth, idealCenter.width)
+        let width = proposal.width ?? idealWidth
+        let center = subviews[1].sizeThatFits(ProposedViewSize(
+            width: centerWidth(in: width, sideWidth: sideWidth), height: nil))
+        return CGSize(width: width, height: max(center.height, max(leading.height, trailing.height)))
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        guard subviews.count == 3 else { return }
+        let sideWidth = max(subviews[0].sizeThatFits(.unspecified).width,
+                            subviews[2].sizeThatFits(.unspecified).width)
+        subviews[0].place(at: CGPoint(x: bounds.minX, y: bounds.midY), anchor: .leading, proposal: .unspecified)
+        subviews[1].place(at: CGPoint(x: bounds.midX, y: bounds.midY), anchor: .center,
+                          proposal: ProposedViewSize(width: centerWidth(in: bounds.width, sideWidth: sideWidth),
+                                                     height: bounds.height))
+        subviews[2].place(at: CGPoint(x: bounds.maxX, y: bounds.midY), anchor: .trailing, proposal: .unspecified)
+    }
+
+    private func centerWidth(in width: CGFloat, sideWidth: CGFloat) -> CGFloat {
+        max(0, min(maximumCenterWidth, width - 2 * (sideWidth + spacing)))
+    }
+}
+
+/// Resolve the initial offset after row measurement, while short conversations retain
+/// the existing top alignment. Later messages are handled by the cancellable scroll task.
+private struct MessageInitialScrollAnchor: ViewModifier {
+    @ViewBuilder func body(content: Content) -> some View {
+        if #available(macOS 15.0, *) {
+            content
+                .defaultScrollAnchor(.bottom, for: .initialOffset)
+                .defaultScrollAnchor(.top, for: .alignment)
+        } else {
+            content
+        }
+    }
 }

@@ -1,89 +1,122 @@
 import Foundation
+import LocalAuthentication
 import Security
 
-/// Credential storage policy for FiberHomeCPEManager.
-///
-/// Analysis of the device's authentication (firmware RP0112):
-/// - The console is plain HTTP at a LAN address; `DO_WEB_LOGIN` carries the full
-///   username and password inside the firmware's AES envelope, but that envelope uses a
-///   shared firmware constant, so it is obfuscation rather than transport encryption.
-/// - The device issues a per-connection session token; there is no long-lived API key,
-///   refresh token or OAuth grant we could store instead.
-/// - Therefore the only secret worth persisting is the account password itself, and it
-///   must never be written to a plist, JSON file, log or UserDefaults.
-///
-/// Chosen storage: the login keychain (`kSecClassGenericPassword`) scoped to this app,
-/// `kSecAttrAccessibleWhenUnlockedThisDeviceOnly` so the item never syncs to iCloud and
-/// never leaves this Mac, with the address+account stored as non-secret metadata so an
-/// address change can be detected. The Data Protection keychain
-/// (`kSecUseDataProtectionKeychain`) is deliberately *not* used: it requires a
-/// `keychain-access-groups` entitlement that only a provisioning profile can grant, and
-/// this project is built and ad-hoc signed locally without an Apple developer identity.
+/// Opt-in system Keychain storage. Never stores a decryption key beside a password
+/// file, broadens an item's ACL, or invokes an authentication dialog in the background.
 public struct CredentialStore: Sendable {
     private let service: String
-    public init(service: String = "local.fhcpem.app.credentials") { self.service = service }
+    private let keychain: any CredentialKeychainClient
 
-    private var baseQuery: [String: Any] {
-        [kSecClass as String: kSecClassGenericPassword,
-         kSecAttrService as String: service,
-         kSecAttrAccount as String: "connection",
-         kSecAttrSynchronizable as String: false]
+    public init(service: String = "local.fhcpem.app.credentials") {
+        self.service = service
+        self.keychain = SystemCredentialKeychain()
     }
-
+    init(service: String, keychain: any CredentialKeychainClient) {
+        self.service = service
+        self.keychain = keychain
+    }
+    private var query: [String: Any] {
+        let context = LAContext()
+        context.interactionNotAllowed = true
+        return [kSecClass as String: kSecClassGenericPassword,
+                kSecAttrService as String: service,
+                kSecAttrAccount as String: "connection",
+                kSecAttrSynchronizable as String: false,
+                kSecUseAuthenticationContext as String: context,
+                kSecUseAuthenticationUI as String: kSecUseAuthenticationUIFail]
+    }
     public func load() throws -> Credentials? {
-        var query = baseQuery
-        query[kSecReturnData as String] = true
-        query[kSecMatchLimit as String] = kSecMatchLimitOne
-        var result: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        var request = query
+        request[kSecReturnData as String] = true
+        request[kSecMatchLimit as String] = kSecMatchLimitOne
+        let (status, data) = keychain.copy(request)
         if status == errSecItemNotFound { return nil }
-        guard status == errSecSuccess, let data = result as? Data else { throw KeychainError(status: status) }
+        guard status == errSecSuccess else { throw KeychainError(status: status) }
+        guard let data else { throw KeychainError(status: errSecDecode) }
         return try JSONDecoder().decode(Credentials.self, from: data)
     }
-
-    /// An item whose access list names a different build of this app makes macOS ask for
-    /// approval on every access. Ad-hoc signing gives each build a new identity, which is
-    /// exactly that situation. Items are therefore created with an access list that trusts
-    /// every application (an empty trusted-application array), so a rebuilt binary never
-    /// triggers a prompt. The item is still scoped to this Mac's login keychain.
-    private func openAccess() -> SecAccess? {
-        var access: SecAccess?
-        let status = SecAccessCreate("FiberHomeCPEManager 管理后台连接" as CFString,
-                                     [] as CFArray, &access)
-        return status == errSecSuccess ? access : nil
-    }
-
     public func save(_ credentials: Credentials) throws {
         let data = try JSONEncoder().encode(credentials)
-        // Recreate rather than update: an update keeps the old, build-specific access list.
-        // A failed delete (item owned by another build) falls through to the update path.
-        let deleted = SecItemDelete(baseQuery as CFDictionary)
-        if deleted == errSecSuccess || deleted == errSecItemNotFound {
-            var add = baseQuery
-            add[kSecValueData as String] = data
-            add[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
-            add[kSecAttrLabel as String] = "FiberHomeCPEManager 管理后台连接"
-            if let access = openAccess() { add[kSecAttrAccess as String] = access }
-            let result = SecItemAdd(add as CFDictionary, nil)
-            guard result == errSecSuccess else { throw KeychainError(status: result) }
-            return
-        }
-        let status = SecItemUpdate(baseQuery as CFDictionary,
-                                   [kSecValueData as String: data] as CFDictionary)
-        guard status == errSecSuccess else { throw KeychainError(status: status) }
+        // Updating preserves the user's existing access decision. Never delete and
+        // recreate on login, or replace the ACL with an all-applications access list.
+        let status = keychain.update(query, attributes: [kSecValueData as String: data])
+        if status == errSecSuccess { return }
+        guard status == errSecItemNotFound else { throw KeychainError(status: status) }
+        var item = query
+        item[kSecValueData as String] = data
+        item[kSecAttrLabel as String] = "FiberHome CPE Manager 管理后台连接"
+        let added = keychain.add(item)
+        guard added == errSecSuccess else { throw KeychainError(status: added) }
     }
-
-    /// The password is cleared before the value is released, so it does not linger in
-    /// memory longer than the request that needs it.
     public func delete() throws {
-        let status = SecItemDelete(baseQuery as CFDictionary)
-        guard status == errSecSuccess || status == errSecItemNotFound else { throw KeychainError(status: status) }
+        let status = keychain.delete(query)
+        guard status == errSecSuccess || status == errSecItemNotFound else {
+            throw KeychainError(status: status)
+        }
     }
-
     public func exists() -> Bool {
-        var query = baseQuery
-        query[kSecMatchLimit as String] = kSecMatchLimitOne
-        return SecItemCopyMatching(query as CFDictionary, nil) == errSecSuccess
+        var request = query
+        request[kSecMatchLimit as String] = kSecMatchLimitOne
+        return keychain.copy(request).0 == errSecSuccess
+    }
+}
+
+protocol CredentialKeychainClient: Sendable {
+    func copy(_ query: [String: Any]) -> (OSStatus, Data?)
+    func update(_ query: [String: Any], attributes: [String: Any]) -> OSStatus
+    func add(_ attributes: [String: Any]) -> OSStatus
+    func delete(_ query: [String: Any]) -> OSStatus
+}
+
+private struct SystemCredentialKeychain: CredentialKeychainClient {
+    private static let gate = CredentialAccessGate()
+    /// The app uses the legacy login Keychain. Suppress its optional UI as well as the
+    /// LAContext UI, serializing our synchronous calls and restoring the process setting.
+    private func withoutAuthenticationUI(_ body: () -> OSStatus) -> OSStatus {
+        Self.gate.perform {
+            var previous: DarwinBoolean = true
+            let read = SecKeychainGetUserInteractionAllowed(&previous)
+            guard read == errSecSuccess else { return read }
+            let disabled = SecKeychainSetUserInteractionAllowed(false)
+            guard disabled == errSecSuccess else { return disabled }
+            defer { _ = SecKeychainSetUserInteractionAllowed(previous.boolValue) }
+            return body()
+        }
+    }
+    func copy(_ query: [String: Any]) -> (OSStatus, Data?) {
+        var result: CFTypeRef?
+        let status = withoutAuthenticationUI { SecItemCopyMatching(query as CFDictionary, &result) }
+        return (status, result as? Data)
+    }
+    func update(_ query: [String: Any], attributes: [String: Any]) -> OSStatus {
+        withoutAuthenticationUI { SecItemUpdate(query as CFDictionary, attributes as CFDictionary) }
+    }
+    func add(_ attributes: [String: Any]) -> OSStatus {
+        withoutAuthenticationUI { SecItemAdd(attributes as CFDictionary, nil) }
+    }
+    func delete(_ query: [String: Any]) -> OSStatus {
+        withoutAuthenticationUI { SecItemDelete(query as CFDictionary) }
+    }
+}
+
+/// A denied background request closes access for the rest of this process. All store
+/// instances share this gate, so reconnects, reads, or repeated save attempts cannot
+/// keep asking securityd for an item this build is not allowed to access.
+final class CredentialAccessGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var deniedStatus: OSStatus?
+
+    func perform(_ operation: () -> OSStatus) -> OSStatus {
+        lock.withLock {
+            if let deniedStatus { return deniedStatus }
+            let status = operation()
+            if [errSecAuthFailed, errSecInteractionNotAllowed, errSecUserCanceled,
+                errSecNotAvailable, errSecMissingEntitlement].contains(status) {
+                deniedStatus = status
+            }
+            return status
+        }
     }
 }
 
@@ -92,10 +125,10 @@ public struct KeychainError: Error, LocalizedError, Sendable {
     public init(status: OSStatus) { self.status = status }
     public var errorDescription: String? {
         switch status {
-        case errSecUserCanceled: "已取消钥匙串访问，连接信息未保存。"
-        case errSecAuthFailed: "钥匙串拒绝访问。可解锁登录钥匙串后重试，或取消“记住连接”。"
-        case errSecInteractionNotAllowed: "钥匙串当前已锁定，暂时无法读取已保存的连接信息。"
-        default: "钥匙串访问失败（\(status)）。连接信息未保存；可取消“记住连接”后重试。"
+        case errSecUserCanceled: "钥匙串访问已取消，请手动输入连接密码。"
+        case errSecAuthFailed, errSecInteractionNotAllowed:
+            "当前应用无法静默访问已保存的密码，请手动输入。重新签名的开发构建可能需要重新授权。"
+        default: "钥匙串访问失败（\(status)），当前连接仍可使用；密码未保存。"
         }
     }
 }

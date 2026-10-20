@@ -2,58 +2,93 @@ import Testing
 import Foundation
 @testable import FHCPECore
 
-/// Device glyph inference.
-///
-/// The firmware reports `deviceType = "Phone"` for cameras and air conditioners, so trusting
-/// the reported type made every appliance render as a phone. Hostname keywords now win.
+/// Inference uses explicit category or product-family clues, never a household inventory.
 struct DeviceIconTests {
-    private func device(_ name: String, type: String? = nil, hostname: String? = nil) -> ConnectedDevice {
-        ConnectedDevice(id: name, name: name, ip: "192.168.8.1", access: .wifi24G,
-                        hostname: hostname, deviceType: type)
+    private func device(_ name: String, type: String? = nil, hostname: String? = nil,
+                        mac: String? = nil) -> ConnectedDevice {
+        ConnectedDevice(id: name, name: name, ip: "192.0.2.10", access: .wifi24G,
+                        mac: mac, hostname: hostname, deviceType: type)
     }
 
-    @Test func applianceNamesWin() {
-        #expect(device("Demo-Device-7c09e0").icon == .washer)
-        #expect(device("Demo-Device-7c09e0").systemSymbol == "washer")
-        #expect(device("Roborock-S8").icon == .vacuum)
-        #expect(device("Aqara-Camera-G100").icon == .camera)
-        #expect(device("Midea-AirConditioner-1").icon == .airConditioner)
-        #expect(device("Midea-RangeHood").icon == .hood)
-        #expect(device("Midea-TanklessHeater").icon == .heater)
+    @Test func explicitApplianceCategories() {
+        #expect(device("Example-Washer").icon == .washer)
+        #expect(device("Example-Washing-Machine").icon == .washer)
+        #expect(device("Example-Vacuum").icon == .vacuum)
+        #expect(device("Example-Camera").icon == .camera)
+        #expect(device("Example-AirConditioner").icon == .airConditioner)
+        #expect(device("Example-Air-Conditioner").icon == .airConditioner)
+        #expect(device("Example-RangeHood").icon == .hood)
+        #expect(device("Example-TanklessHeater").icon == .heater)
+        #expect(device("示例洗衣机").icon == .washer)
+        #expect(device("示例摄像头").icon == .camera)
     }
 
-    /// Regression: the reported type must not override a recognised appliance name.
+    @Test(arguments: ["Roborock", "Roborock-Example", "Aqara", "Midea", "Apple",
+                      "Samsung", "Tuya", "Espressif"])
+    func vendorAloneDoesNotIdentifyADeviceCategory(_ name: String) {
+        #expect(device(name).icon == .unknown)
+    }
+
+    @Test(arguments: ["Example-H1-Air", "Example-WM-Device", "machine", "dispatch",
+                      "switch", "roadwatch", "hoodie", "tvstand", "robot", "mousepad", "pcie"])
+    func ambiguousNamesAndEmbeddedSubstringsStayUnknown(_ name: String) {
+        #expect(device(name).icon == .unknown)
+    }
+
+    @Test func macAddressDoesNotDetermineCategory() {
+        #expect(device("Example-Endpoint", mac: "02:00:00:00:00:01").icon == .unknown)
+        #expect(device("Example-Endpoint", mac: "02:00:00:00:00:02").icon == .unknown)
+    }
+
+    /// Some firmware reports appliances as phones; explicit category names take priority.
     @Test func reportedPhoneTypeDoesNotOverrideAppliance() {
-        let aircon = device("Midea-AirConditioner-1", type: "Phone")
+        let aircon = device("Example-AirConditioner", type: "Phone")
         #expect(aircon.icon == .airConditioner)
         #expect(aircon.systemSymbol == "air.conditioner.horizontal")
     }
 
-    @Test func appleDevices() {
-        #expect(device("iPhone").icon == .phone)
-        #expect(device("Watch").icon == .watch)
-        #expect(device("Mac").icon == .desktop)
-        #expect(device("MacBook-Pro").icon == .laptop)
+    @Test func commonProductFamiliesAndExplicitTypes() {
+        #expect(device("Example-iPhone").icon == .phone)
+        #expect(device("Example-iPhone16").icon == .phone)
+        #expect(device("Example-iPad13").icon == .tablet)
+        #expect(device("Example-Watch").icon == .watch)
+        #expect(device("Example-iMac").icon == .desktop)
+        #expect(device("Example-Mac-mini").icon == .desktop)
+        #expect(device("Example-MacBook-Pro").icon == .laptop)
+        #expect(device("Example-AppleTV").icon == .tv)
+        #expect(device("Example-PlayStation5").icon == .gamepad)
+        #expect(device("Example-Nintendo-Switch").icon == .gamepad)
+        #expect(device("Example-Endpoint", type: "Laptop").icon == .laptop)
+        #expect(device("Example-Endpoint", type: "Tablet").icon == .tablet)
+        #expect(device("Example-Endpoint", type: "IPCamera").icon == .camera)
     }
 
-    /// A generic hostname must not hide the meaningful display name.
+    @Test func unrecognizedFirmwareTypeStaysUnknown() {
+        #expect(device("Example-Endpoint", type: "notphone").icon == .unknown)
+        #expect(device("Example-Endpoint", type: "HPC").icon == .unknown)
+    }
+
     @Test func displayNameIsUsedWhenHostnameIsGeneric() {
-        let camera = device("Aqara-Camera-G100", hostname: "android-abc123")
+        let camera = device("Example-Camera", hostname: "android-example")
         #expect(camera.icon == .camera)
     }
 
-    @Test func unknownFallsBackToDashedQuestionMark() {
-        #expect(device("ESP_9F2A11").icon == .unknown)
-        #expect(device("ESP_9F2A11").systemSymbol == "questionmark.square.dashed")
+    @Test func explicitCategoryCanComeFromHostname() {
+        #expect(device("Example-Endpoint", hostname: "example-vacuum").icon == .vacuum)
     }
 
-    /// Every inferred icon resolves to a symbol that exists on this OS.
-    @Test func everySymbolNameIsAvailable() {
-        let names = ["Demo-Device-7c09e0", "Aqara-Camera-G100", "Midea-AirConditioner-1",
-                     "Midea-RangeHood", "Midea-TanklessHeater", "iPhone", "Watch", "Mac", "ESP_1"]
-        for name in names {
-            let symbol = device(name).systemSymbol
-            #expect(!symbol.isEmpty)
-        }
+    @Test func separateFieldsDoNotFormACategory() {
+        #expect(device("air", hostname: "conditioner").icon == .unknown)
+    }
+
+    @Test func unknownFallsBackToDashedQuestionMark() {
+        #expect(device("Example-Endpoint").icon == .unknown)
+        #expect(device("Example-Endpoint").systemSymbol == "questionmark.square.dashed")
+    }
+
+    @Test func inferredCategoriesResolveToSymbols() {
+        #expect(device("Example-Washer").systemSymbol == "washer")
+        #expect(device("Example-Camera").systemSymbol == "web.camera")
+        #expect(device("Example-Vacuum").systemSymbol == "fan.floor")
     }
 }

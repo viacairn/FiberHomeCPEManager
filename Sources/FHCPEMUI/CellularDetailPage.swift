@@ -163,8 +163,6 @@ public struct CellularDetailPage: View {
                 HStack(spacing: 8) {
                     StatCell(label: "发射功率", value: FieldFormat.dbm(data.radio.power),
                              valueFont: .system(size: 11.5, weight: .bold).monospacedDigit())
-                    StatCell(label: "PLMN", value: data.isLive ? (data.radio.plmn ?? data.snapshot?.plmn) : nil,
-                             valueFont: .system(size: 11.5, weight: .bold).monospacedDigit())
                 }
                 if reportedValue(data.radio.scs) != nil || reportedValue(data.radio.mimo) != nil {
                     HStack(spacing: 8) {
@@ -295,21 +293,26 @@ public struct CellularDetailPage: View {
                     Text("\(cell.tech.title) · \(Self.uppercaseBand(cell.band))")
                         .font(.system(size: 10, weight: .bold).monospacedDigit())
                         .foregroundStyle(Color.accentColor)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.75)
                         .padding(.horizontal, 6)
                         .padding(.vertical, 1.5)
                         .background(Color.accentColor.opacity(0.12), in: Capsule())
                 }
-                .frame(width: 74, alignment: .leading)
+                .frame(width: 58, alignment: .leading)
 
                 // PCI & ARFCN column
                 VStack(alignment: .leading, spacing: 2.5) {
                     Text("PCI \(cell.pci)")
                         .font(.system(size: 12.5, weight: .bold).monospacedDigit())
                         .foregroundStyle(.primary)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.75)
                     Text("频点 \(cell.channel ?? "—")")
                         .font(.system(size: 10, weight: .medium).monospacedDigit())
                         .foregroundStyle(Theme.inkSecondary)
                         .lineLimit(1)
+                        .minimumScaleFactor(0.75)
                 }
 
                 Spacer(minLength: 4)
@@ -323,9 +326,12 @@ public struct CellularDetailPage: View {
                         Text(FieldFormat.dbm(cell.rsrp) ?? "—")
                             .font(.system(size: 11, weight: .bold).monospacedDigit())
                             .foregroundStyle(rsrpNum != nil ? rsrpColor : Theme.inkSecondary)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.7)
                     }
                     .padding(.horizontal, 7)
                     .padding(.vertical, 4)
+                    .frame(width: 68, alignment: .trailing)
                     .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
 
                     VStack(alignment: .trailing, spacing: 1.5) {
@@ -335,9 +341,12 @@ public struct CellularDetailPage: View {
                         Text(FieldFormat.db(cell.sinr) ?? "—")
                             .font(.system(size: 11, weight: .bold).monospacedDigit())
                             .foregroundStyle(.primary)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.7)
                     }
                     .padding(.horizontal, 7)
                     .padding(.vertical, 4)
+                    .frame(width: 68, alignment: .trailing)
                     .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
                 }
             }

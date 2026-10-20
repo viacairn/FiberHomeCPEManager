@@ -2,8 +2,7 @@ import Testing
 import Foundation
 @testable import FHCPECore
 
-/// Password input checks: unintended conversion by a Chinese IME
-/// converting it to "，" must be caught before a login request burns an attempt.
+/// Input-method conversion must be caught before a login request consumes an attempt.
 struct PasswordInputTests {
     @Test func asciiPasswordIsAccepted() {
         #expect(PasswordInput.issue(in: "Test12345,") == nil)

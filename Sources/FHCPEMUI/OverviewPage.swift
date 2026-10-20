@@ -2,7 +2,7 @@ import SwiftUI
 import FHCPECore
 
 /// Overview page: network card, compact traffic metrics and a four-column cellular
-/// summary. Content scrolls within the shared page canvas.
+/// summary. The four traffic readings follow the committed v6 reference layout.
 public struct OverviewPage: View {
     public let data: PageData
     public let onMoreInfo: () -> Void
@@ -13,21 +13,17 @@ public struct OverviewPage: View {
     }
 
     public var body: some View {
-        VStack(spacing: 0) {
-            ScrollView(.vertical) {
-                VStack(spacing: 7) {
-                    heroCard
-                    metricGrid
-                    connectionGrid
-                    if data.shouldShowCellularSummary {
-                        cellularSummary
-                    }
-                }
-                .padding(.horizontal, Theme.contentPadding)
-                .padding(.bottom, 6)
+        VStack(spacing: 7) {
+            heroCard
+            metricGrid
+            connectionGrid
+            if data.shouldShowCellularSummary {
+                cellularSummary
             }
-            .scrollIndicators(.never)
+            Spacer(minLength: 0)
         }
+        .padding(.horizontal, Theme.contentPadding)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }
 
     // MARK: Hero card
@@ -41,16 +37,16 @@ public struct OverviewPage: View {
                 if data.shouldShowCellularSummary {
                     SignalBars(level: data.signalBars, activeColor: .accentColor,
                                inactiveColor: Theme.inkMuted.opacity(0.35),
-                               barWidth: 3, gap: 2, unit: 2)
+                               barWidth: 4.0, gap: 2.5, unit: 3.5)
                 } else {
                     Image(systemName: "cable.connector")
-                        .font(.system(size: 14, weight: .semibold))
+                        .font(.system(size: 16, weight: .semibold))
                         .foregroundStyle(Color.accentColor)
                 }
                 VStack(alignment: .leading, spacing: 1) {
                     HStack(alignment: .firstTextBaseline, spacing: 5) {
                         Text(heroTitle)
-                            .font(.system(size: 16.5, weight: .bold))
+                            .font(.system(size: 18.5, weight: .bold))
                             .foregroundStyle(.primary)
                             .lineLimit(1)
                             .minimumScaleFactor(0.8)
@@ -75,6 +71,7 @@ public struct OverviewPage: View {
                     .fixedSize()
                 }
             }
+            .frame(height: 22)
 
             Rectangle()
                 .fill(Theme.hairline)
@@ -200,27 +197,26 @@ public struct OverviewPage: View {
 
     private var metricGrid: some View {
         let valueFont = Font.system(size: 22, weight: .bold).monospacedDigit()
-        return Panel(padding: 8, spacing: 4) {
-            Grid(horizontalSpacing: 8, verticalSpacing: 4) {
-                GridRow {
-                    MetricCell(value: rate(data.snapshot?.uploadBps), unit: rateUnit(data.snapshot?.uploadBps),
-                               caption: "上行速率", valueFont: valueFont,
-                               accessibilityValue: rateAccessibility(data.snapshot?.uploadBps))
-                    MetricCell(value: traffic(data.snapshot?.todayBytes), unit: trafficUnit(data.snapshot?.todayBytes),
-                               caption: "今日流量", valueFont: valueFont,
-                               accessibilityValue: trafficAccessibility(data.snapshot?.todayBytes))
-                }
-                GridRow {
-                    MetricCell(value: rate(data.snapshot?.downloadBps), unit: rateUnit(data.snapshot?.downloadBps),
-                               caption: "下行速率", valueFont: valueFont,
-                               accessibilityValue: rateAccessibility(data.snapshot?.downloadBps))
-                    MetricCell(value: traffic(data.snapshot?.monthBytes), unit: trafficUnit(data.snapshot?.monthBytes),
-                               caption: "本月流量", valueFont: valueFont,
-                               accessibilityValue: trafficAccessibility(data.snapshot?.monthBytes))
-                }
+        return Grid(horizontalSpacing: 8, verticalSpacing: 6) {
+            GridRow {
+                MetricCell(value: rate(data.snapshot?.uploadBps), unit: rateUnit(data.snapshot?.uploadBps),
+                           caption: "上行速率", valueFont: valueFont,
+                           accessibilityValue: rateAccessibility(data.snapshot?.uploadBps))
+                MetricCell(value: traffic(data.snapshot?.todayBytes), unit: trafficUnit(data.snapshot?.todayBytes),
+                           caption: "今日流量", valueFont: valueFont,
+                           accessibilityValue: trafficAccessibility(data.snapshot?.todayBytes))
             }
-            .frame(maxWidth: .infinity)
+            GridRow {
+                MetricCell(value: rate(data.snapshot?.downloadBps), unit: rateUnit(data.snapshot?.downloadBps),
+                           caption: "下行速率", valueFont: valueFont,
+                           accessibilityValue: rateAccessibility(data.snapshot?.downloadBps))
+                MetricCell(value: traffic(data.snapshot?.monthBytes), unit: trafficUnit(data.snapshot?.monthBytes),
+                           caption: "本月流量", valueFont: valueFont,
+                           accessibilityValue: trafficAccessibility(data.snapshot?.monthBytes))
+            }
         }
+        .frame(maxWidth: .infinity)
+        .padding(9)
     }
 
     /// Compact 2x2 Bento card: online devices, SMS count, uptime, module temperature.
@@ -246,11 +242,14 @@ public struct OverviewPage: View {
             Text(label)
                 .font(.system(size: 9.5, weight: .semibold))
                 .foregroundStyle(Theme.inkSecondary)
+                .lineLimit(1)
+                .frame(height: 12)
             Text(value ?? "—")
                 .font(.system(size: 11.5, weight: .bold).monospacedDigit())
                 .foregroundStyle(value == nil ? Theme.inkMuted : Color.primary)
                 .lineLimit(1)
                 .minimumScaleFactor(0.75)
+                .frame(height: 15)
             LevelMeter(level: quality.level, tint: quality.tint)
         }
         .frame(maxWidth: .infinity)
@@ -265,12 +264,14 @@ public struct OverviewPage: View {
                 .font(.system(size: 9.5, weight: .semibold))
                 .foregroundStyle(Theme.inkSecondary)
                 .lineLimit(1)
+                .frame(height: 12)
             Text(value ?? "—")
                 .font(.system(size: 11.5, weight: .bold).monospacedDigit())
                 .foregroundStyle(value == nil ? Theme.inkMuted : Color.primary)
                 .lineLimit(1)
                 .minimumScaleFactor(0.75)
                 .textSelection(.enabled)
+                .frame(height: 15)
         }
         .frame(maxWidth: .infinity)
         .accessibilityElement(children: .combine)
@@ -320,19 +321,19 @@ public struct OverviewPage: View {
                                quality: SignalQuality.rsrq(MetricFormatter.number(data.radio.rsrq)))
                     signalCell("SINR", value: FieldFormat.db(data.radio.sinr),
                                quality: SignalQuality.sinr(MetricFormatter.number(data.radio.sinr)))
-                    cellularStat("RSSI", value: FieldFormat.dbm(data.radio.rssi))
+                    signalCell("RSSI", value: FieldFormat.dbm(data.radio.rssi),
+                               quality: SignalQuality.rssi(MetricFormatter.number(data.radio.rssi)))
 
-                    // Where the device is camped, broad to narrow: tracking area, cell,
-                    // physical cell id, carrier frequency.
+                    // Identity from tracking area to cell, followed by radio channel.
                     cellularStat("TAC", value: data.radio.tac)
                     cellularStat(data.isNR ? "NCI" : "Cell ID", value: data.radio.cell.map(FieldFormat.hex))
                     cellularStat("PCI", value: data.radio.pci)
                     cellularStat(data.isNR ? "NR-ARFCN" : "EARFCN", value: data.radio.arfcn)
 
+                    cellularStat("CQI", value: data.radio.cqi)
                     cellularStat("QCI 承载等级", value: data.radio.qci)
                     cellularStat("上行签约速率", value: ulAmbrText)
                     cellularStat("下行签约速率", value: dlAmbrText)
-                    cellularStat("CQI", value: data.radio.cqi)
                 }
             }
         }

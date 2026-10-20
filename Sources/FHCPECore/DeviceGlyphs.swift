@@ -1,6 +1,6 @@
 import Foundation
 
-/// Icons a user can pin onto a host, covering the appliances this LAN actually has.
+/// General categories available when a user chooses a device's icon manually.
 public enum DeviceGlyph: String, CaseIterable, Codable, Sendable {
     case vacuum, camera, airConditioner, airPurifier, washer, dryer, refrigerator
     case microwave, dishwasher, waterHeater, hood, router, tv, speaker, gamepad
@@ -57,7 +57,8 @@ public enum DeviceGlyph: String, CaseIterable, Codable, Sendable {
     }
 }
 
-/// Per-host icon overrides, keyed by MAC address (falling back to hostname then name).
+/// Per-host icon overrides, keyed by MAC address. Without a MAC, a hostname or name is
+/// scoped to its current IP; an address change does not establish the same device.
 ///
 /// A pin is remembered for one month: if the same host has not appeared for 30 days the
 /// entry is dropped, so a guest device that never comes back does not leave a stale icon
@@ -71,8 +72,8 @@ public struct DeviceGlyphStore {
         public var glyph: DeviceGlyph
         /// Last time this host was seen, used for expiry.
         public var lastSeen: Date
-        /// Both stable aliases are retained, so a pin survives a DHCP/name change on either
-        /// side: same MAC with a renamed host, or same hostname after a randomized MAC.
+        /// Identity metadata retained for existing saved pins. A known MAC must agree;
+        /// a shared hostname does not establish that two MAC addresses are one device.
         public var mac: String?
         public var hostname: String?
         public init(glyph: DeviceGlyph, lastSeen: Date, mac: String? = nil, hostname: String? = nil) {
@@ -87,27 +88,18 @@ public struct DeviceGlyphStore {
         self.defaults = defaults
     }
 
-    /// Stable primary identity for a host: MAC wins, then hostname, then display name.
+    /// MAC is the stable identity. Weak names are qualified by the current IP so two
+    /// endpoints with a shared default name cannot share a manually selected icon.
     public static func identity(of device: ConnectedDevice) -> String {
         if let mac = normalizedMAC(device.mac) {
             return "mac:" + mac
         }
+        let address = normalizedIP(device.ip) ?? ""
         if let host = normalizedHost(device.hostname) {
-            return "host:" + host
-        }
-        return "name:" + device.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-    }
-
-    /// Every key a host can be recognised by. The primary key is used for storage; the
-    /// others make the pin robust when only one of MAC/hostname changes.
-    static func identityCandidates(of device: ConnectedDevice) -> [String] {
-        var keys = [identity(of: device)]
-        if let host = normalizedHost(device.hostname) {
-            keys.append("host:" + host)
+            return "host:" + host + "|ip:" + address
         }
         let name = device.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        if !name.isEmpty { keys.append("name:" + name) }
-        return keys
+        return "name:" + name + "|ip:" + address
     }
 
     private static func normalizedMAC(_ raw: String?) -> String? {
@@ -124,17 +116,30 @@ public struct DeviceGlyphStore {
         return raw.lowercased()
     }
 
-    /// True when the entry belongs to the device via its key, MAC or hostname.
+    private static func normalizedIP(_ raw: String) -> String? {
+        let value = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return value.isEmpty ? nil : value
+    }
+
+    /// A stored MAC key remains authoritative for legacy entries too, including entries
+    /// whose metadata an older version refreshed through a shared hostname.
+    private static func storedMAC(entryKey: String, entry: Entry) -> String? {
+        if entryKey.hasPrefix("mac:") {
+            return normalizedMAC(String(entryKey.dropFirst(4)))
+        }
+        return normalizedMAC(entry.mac)
+    }
+
+    /// MAC identity is decisive. A weak pin requires its name and current IP to agree.
+    /// Legacy bare name/hostname keys have no address evidence and are not inherited.
     static func matches(entryKey: String, entry: Entry, device: ConnectedDevice) -> Bool {
-        if identityCandidates(of: device).contains(entryKey) { return true }
-        if let mac = normalizedMAC(device.mac), let entryMAC = entry.mac, mac == entryMAC {
-            return true
+        let mac = normalizedMAC(device.mac)
+        let entryMAC = storedMAC(entryKey: entryKey, entry: entry)
+        if mac != nil || entryMAC != nil {
+            return mac != nil && mac == entryMAC
         }
-        if let host = normalizedHost(device.hostname),
-           let entryHost = entry.hostname, host == entryHost {
-            return true
-        }
-        return false
+        guard normalizedIP(device.ip) != nil else { return false }
+        return entryKey == identity(of: device)
     }
 
     public func all() -> [String: Entry] {
@@ -150,23 +155,36 @@ public struct DeviceGlyphStore {
     }
 
     public func glyph(for device: ConnectedDevice) -> DeviceGlyph? {
-        let entries = all()
+        glyph(for: device, in: all())
+    }
+
+    public func glyph(for device: ConnectedDevice, in entries: [String: Entry]) -> DeviceGlyph? {
+        guard !entries.isEmpty else { return nil }
         let key = Self.identity(of: device)
-        if let exact = entries[key] { return exact.glyph }
+        if let exact = entries[key], Self.matches(entryKey: key, entry: exact, device: device) {
+            return exact.glyph
+        }
         return entries.first { Self.matches(entryKey: $0.key, entry: $0.value, device: device) }?.value.glyph
     }
 
     public func assign(_ glyph: DeviceGlyph?, to device: ConnectedDevice, now: Date = Date()) {
+        guard Self.normalizedMAC(device.mac) != nil || Self.normalizedIP(device.ip) != nil else { return }
         var entries = all()
         let key = Self.identity(of: device)
-        // Remove every alias of this host first, so changing a pinned icon cannot leave a
-        // second entry behind under an old MAC/hostname and later resurrect it.
+        // Remove only entries belonging to this identity. A reused hostname must not
+        // replace or clear another MAC's manually chosen icon.
         for entryKey in Array(entries.keys) {
             guard let entry = entries[entryKey],
                   Self.matches(entryKey: entryKey, entry: entry, device: device) else { continue }
             entries.removeValue(forKey: entryKey)
         }
         if let glyph {
+            // Older versions could attach a MAC to a hostname-keyed entry. Preserve that
+            // device's pin before reusing its fallback key for a device without a MAC.
+            if let displaced = entries[key], let mac = Self.storedMAC(entryKey: key, entry: displaced) {
+                let macKey = "mac:" + mac
+                if entries[macKey] == nil { entries[macKey] = displaced }
+            }
             entries[key] = Entry(glyph: glyph, lastSeen: now,
                                  mac: Self.normalizedMAC(device.mac),
                                  hostname: Self.normalizedHost(device.hostname))
@@ -175,8 +193,8 @@ public struct DeviceGlyphStore {
     }
 
     /// Marks every host in devices as seen, then drops entries older than the retention
-    /// window. Returns the number of removed entries. Matching uses both the MAC and the
-    /// hostname alias, so a returning host keeps its pin even if one of them changed.
+    /// window. Returns the number of removed entries. A matching MAC survives DHCP/name
+    /// changes; a shared hostname with a different MAC does not refresh the old entry.
     @discardableResult
     public func prune(keeping devices: [ConnectedDevice], now: Date = Date()) -> Int {
         let original = all()
@@ -187,7 +205,7 @@ public struct DeviceGlyphStore {
                   let host = devices.first(where: { Self.matches(entryKey: entryKey, entry: entry, device: $0) })
             else { continue }
             entries[entryKey]?.lastSeen = now
-            // Refresh aliases from the currently observed host.
+            // Refresh metadata only after confirming the same device identity.
             if let mac = Self.normalizedMAC(host.mac) { entries[entryKey]?.mac = mac }
             if let name = Self.normalizedHost(host.hostname) { entries[entryKey]?.hostname = name }
         }

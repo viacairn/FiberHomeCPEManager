@@ -86,12 +86,7 @@ public struct ControlsPage: View {
                     .padding(.bottom, Theme.contentPadding)
                 }
                 .scrollIndicators(.automatic)
-                if let status {
-                    StatusBanner(text: status, tone: statusIsError ? .error : .success)
-                        .padding(.horizontal, Theme.contentPadding)
-                        .padding(.top, 6)
-                        .padding(.bottom, 8)
-                }
+                .scrollBounceBehavior(.basedOnSize)
             } else {
                 disconnectedState
             }
@@ -156,7 +151,7 @@ public struct ControlsPage: View {
         let active = settings?.activeUplink
         return VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
-                PanelHeading("上行运行模式")
+                PanelHeading("上网运行模式")
                 Spacer(minLength: 0)
                 if settings == nil {
                     ProgressView().controlSize(.mini)
@@ -297,7 +292,7 @@ public struct ControlsPage: View {
                         withAnimation(Theme.snap) { showBackupWiFi.toggle() }
                     } label: {
                         HStack(spacing: 2) {
-                            Text("备用通道 \(primaryWiFi.count)/\(settings.wifi.count)")
+                            Text("访客 Wi-Fi \(primaryWiFi.count)/\(settings.wifi.count)")
                             Image(systemName: showBackupWiFi ? "chevron.up" : "chevron.down")
                                 .font(.system(size: 8, weight: .semibold))
                         }
@@ -306,7 +301,7 @@ public struct ControlsPage: View {
                         .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
-                    .accessibilityLabel("备用通道，\(showBackupWiFi ? "已展开" : "已折叠")")
+                    .accessibilityLabel("访客 Wi-Fi，\(showBackupWiFi ? "已展开" : "已折叠")")
                 }
             }
 
@@ -505,6 +500,7 @@ public struct ControlsPage: View {
                         .disabled(busy || settings == nil)
                         .accessibilityLabel("机身指示灯")
                     }
+                    .frame(height: Theme.inlineControlRowHeight)
                 }
 
                 Panel(padding: 10, spacing: 5) {
@@ -564,6 +560,7 @@ public struct ControlsPage: View {
                         }
                         .accessibilityLabel("风扇模式：\(fanTitle)")
                     }
+                    .frame(height: Theme.inlineControlRowHeight)
                 }
             }
 
@@ -572,7 +569,7 @@ public struct ControlsPage: View {
                     Image(systemName: "rectangle.stack").font(.system(size: 11, weight: .medium)).foregroundStyle(Theme.inkSecondary)
                     Text("MLO 多链路聚合").font(.system(size: 11.5, weight: .medium)).foregroundStyle(Theme.inkSecondary)
                     Spacer(minLength: 0)
-                    Text(settings?.supportsMLO == true ? "\(settings?.mloGroups ?? 0) 个链路组" : "本固件未启用")
+                    Text(settings?.supportsMLO == true ? "\(settings?.mloGroups ?? 0) 个链路组" : "懒得做")
                         .font(.system(size: 9.5, weight: .medium))
                         .foregroundStyle(Theme.inkMuted)
                 }

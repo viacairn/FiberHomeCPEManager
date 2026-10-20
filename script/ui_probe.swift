@@ -115,6 +115,32 @@ func fanMenuWindowFrame() -> CGRect? {
     return nil
 }
 
+/// Fan, antenna and device access filters use the same anchored choice popover.
+func choicePopoverRoot() -> AXUIElement? {
+    guard let frame = fanMenuWindowFrame() else { return nil }
+    var element: AXUIElement?
+    AXUIElementCopyElementAtPosition(AXUIElementCreateSystemWide(), Float(frame.midX), Float(frame.midY), &element)
+    var node = element
+    for _ in 0..<8 {
+        guard let current = node else { return nil }
+        if ["AXPopover", "AXWindow"].contains(attribute(current, kAXRoleAttribute)) { return current }
+        var parent: CFTypeRef?
+        AXUIElementCopyAttributeValue(current, kAXParentAttribute as CFString, &parent)
+        node = parent.flatMap { CFGetTypeID($0) == AXUIElementGetTypeID() ? unsafeBitCast($0, to: AXUIElement.self) : nil }
+    }
+    return nil
+}
+
+func scrollPageToBottom(_ root: AXUIElement) {
+    if let bar = descendants(root).first(where: {
+        attribute($0, kAXRoleAttribute) == "AXScrollBar" &&
+        attribute($0, kAXOrientationAttribute) == "AXVerticalOrientation"
+    }) {
+        _ = AXUIElementSetAttributeValue(bar, kAXValueAttribute as CFString, NSNumber(value: 1))
+        usleep(300_000)
+    }
+}
+
 
 /// `NSPopover` content is an AXPopover under the status item, not an app window.
 func popoverRoot() -> AXUIElement? {
@@ -365,7 +391,7 @@ case "tabs":
     openPopover()
     // Each tab must expose its page and a real value from the device.
     let expectations: [(String, String)] = [
-        ("概览", "蜂窝信息"), ("设备", "全部"), ("控制", "上行运行模式"), ("短信", "新消息")
+        ("概览", "蜂窝信息"), ("设备", "全部"), ("控制", "上网运行模式"), ("短信", "新消息")
     ]
     for (index, expected) in expectations.enumerated() {
         tapTab(index: index)
@@ -383,10 +409,10 @@ case "tabs":
 
 case "about":
     check("关于菜单可打开页面", chooseStatusMenuItem("关于 FiberHome CPE Manager"))
-    check("关于显示产品与支持型号", waitFor { pageHasText("支持 LG6851F / RP0112") && pageHasText("FiberHome CPE Manager") })
+    check("关于显示产品与支持型号", waitFor { pageHasText("烽火 CPE 设备，RP0106+") && pageHasText("FiberHome CPE Manager") })
     check("关于显示内存与钥匙串说明", pageHasText("仅保存在内存") && pageHasText("系统钥匙串"))
     activateApp(); pressKey(53)
-    check("Esc 返回之前页面", waitFor { !pageHasText("支持 LG6851F / RP0112") && popoverRoot() != nil })
+    check("Esc 返回之前页面", waitFor { !pageHasText("烽火 CPE 设备，RP0106+") && popoverRoot() != nil })
 
 case "relogin":
     check("重新登录菜单可执行", chooseStatusMenuItem("重新登录"))
@@ -431,8 +457,8 @@ case "contextmenu":
     click(at: CGPoint(x: origin.x + 60, y: 500))
 
 case "login-fullwidth":
-    // The firmware password ends in an ASCII comma. A Chinese IME produces "，"; the form
-    // must flag it before sending instead of burning a login attempt.
+    // Password editing requests a Roman keyboard. Paste can bypass the input method,
+    // so a full-width paste must also be rejected before entering the field.
     resetUI()
     openPopover()
     activateApp()
@@ -451,19 +477,31 @@ case "login-fullwidth":
     } }) ?? []
     check("全角密码提示出现", afterPaste.contains { $0.contains("全角") },
           afterPaste.first { $0.contains("全角") } ?? "no warning")
-    if let fix = descendants(popoverRoot() ?? root).first(where: {
+    check("全角粘贴未进入密码框", attribute(password, kAXValueAttribute).isEmpty)
+    NSPasteboard.general.clearContents()
+    NSPasteboard.general.setString("Test12345,", forType: .string)
+    click(password)
+    pressKey(0, flags: .maskCommand)
+    pressKey(9, flags: .maskCommand)
+    usleep(600_000)
+    // Secure fields may intentionally hide AXValue. Native LoginPasswordTests cover
+    // accepted ASCII input; this interaction check covers rejection and notice dismissal.
+    // Notices intentionally remain visible for ten seconds, even after valid input.
+    // Dismiss through the user's close control instead of expecting a status reset.
+    let closeNotice = popoverRoot().flatMap { descendants($0).first {
         attribute($0, kAXRoleAttribute) == "AXButton" &&
-        attribute($0, kAXDescriptionAttribute).contains("改为半角")
-    }) {
-        _ = AXUIElementPerformAction(fix, kAXPressAction as CFString)
-        usleep(600_000)
+        attribute($0, kAXDescriptionAttribute) == "关闭提醒"
+    } }
+    if let closeNotice {
+        click(closeNotice)
+        usleep(250_000)
+        let text = popoverRoot().map { descendants($0).flatMap {
+            [attribute($0, kAXValueAttribute), attribute($0, kAXDescriptionAttribute)]
+        } } ?? []
+        check("密码提醒可手动关闭", !text.contains { $0.contains("全角") })
     } else {
-        check("改为半角按钮存在", false)
+        check("密码提醒提供关闭按钮", false)
     }
-    let afterFix = (popoverRoot().map { descendants($0).flatMap {
-        [attribute($0, kAXValueAttribute), attribute($0, kAXDescriptionAttribute)]
-    } }) ?? []
-    check("全角提示已消失", !afterFix.contains { $0.contains("全角") })
     NSPasteboard.general.clearContents()
 
 case "login-extra":
@@ -471,6 +509,9 @@ case "login-extra":
     openPopover()
     guard let root = popoverRoot() else { print("  FAIL no popover"); break }
     let all = descendants(root)
+    let text = all.map { attribute($0, kAXValueAttribute) }
+    check("全局标题只出现一次", text.filter { $0 == "FiberHome CPE Manager" }.count == 1)
+    check("登录无静态提示小字", !text.contains { $0.contains("请连接到设备所在的局域网") || $0.contains("管理地址通常印在设备背面") })
     check("保存密码勾选项存在", all.contains {
         attribute($0, kAXRoleAttribute) == "AXCheckBox" &&
         attribute($0, kAXDescriptionAttribute).contains("保存密码")
@@ -543,7 +584,7 @@ case "cmdq":
     check("⌘Q 退出应用", waitUntilQuit(pid: pid))
 
 case "power":
-    // The panel has no header any more, so the menu-bar context menu is the UI quit path.
+    // The menu-bar context menu is the UI quit path.
     resetUI()
     closePopover()
     guard let item = statusItemElement() else { print("  FAIL no status item"); break }
@@ -621,7 +662,7 @@ case "a11y":
         }
     }
 
-    let markers = ["蜂窝信息", "全部", "上行运行模式", "新消息"]
+    let markers = ["蜂窝信息", "全部", "上网运行模式", "新消息"]
     for (index, marker) in markers.enumerated() {
         pressKey(CGKeyCode(18 + index), flags: .maskCommand)
         _ = waitFor(2.0) {
@@ -638,7 +679,7 @@ case "a11y":
     pressKey(18, flags: .maskCommand)
     _ = waitFor(1.5, { popoverRoot() != nil })
     if let detail = descendants(popoverRoot() ?? AXUIElementCreateSystemWide()).first(where: {
-        attribute($0, kAXDescriptionAttribute).contains("蜂窝详情")
+        attribute($0, kAXDescriptionAttribute) == "更多"
     }) {
         _ = AXUIElementPerformAction(detail, kAXPressAction as CFString)
         _ = waitFor(1.5, { popoverRoot() != nil })
@@ -669,9 +710,6 @@ case "sms":
     pressKey(21, flags: .maskCommand)   // ⌘4 → 短信
     usleep(800_000)
     guard let root = popoverRoot() else { print("  FAIL no popover"); break }
-    let labels = descendants(root).map { attribute($0, kAXDescriptionAttribute) }
-    let values = descendants(root).compactMap { attribute($0, kAXValueAttribute) as? String }
-    let all = labels + values
     // The operator-fact capsules were removed by request. Detect the old 16 pt chips by
     // size, not by text: message bodies legitimately contain "GB" and "积分".
     let smallCapsules = descendants(root).filter {
@@ -783,14 +821,14 @@ case "sms-send":
         let texts = descendants(r).flatMap {
             [attribute($0, kAXValueAttribute), attribute($0, kAXDescriptionAttribute)]
         }
-        return texts.contains { $0.contains("已回复") || $0.contains("发送失败") }
+        return texts.contains { $0.contains("已发送至") || $0.contains("发送失败") }
     }
     let texts = (popoverRoot().map { descendants($0).flatMap {
         [attribute($0, kAXValueAttribute), attribute($0, kAXDescriptionAttribute)]
     } }) ?? []
     check("发送流量查询完成", finished)
-    check("发送状态可见", texts.contains { $0.contains("已回复") || $0.contains("发送失败") },
-          texts.first { $0.contains("已回复") || $0.contains("发送失败") } ?? "no status")
+    check("发送状态可见", texts.contains { $0.contains("已发送至") || $0.contains("发送失败") },
+          texts.first { $0.contains("已发送至") || $0.contains("发送失败") } ?? "no status")
     print("     status texts: \(texts.filter { $0.contains("回复") || $0.contains("发送") }.prefix(8))")
     // The app reloads conversations after a successful send; give it a moment and check
     // that the outbound message appears in the conversation or its list.
@@ -809,7 +847,7 @@ case "controls-stable":
     activateApp()
     pressKey(20, flags: .maskCommand)
     usleep(1_200_000)
-    guard let root = popoverRoot() else { print("  FAIL no popover"); break }
+    guard popoverRoot() != nil else { print("  FAIL no popover"); break }
     func switches() -> [(label: String, value: Int?, enabled: Bool?)] {
         guard let r = popoverRoot() else { return [] }
         return descendants(r).filter { attribute($0, kAXRoleAttribute) == "AXCheckBox" }.map {
@@ -946,7 +984,24 @@ case "devices-filter-select":
     pressKey(19, flags: .maskCommand)
     usleep(900_000)
     guard let root = popoverRoot() else { print("  FAIL no popover"); break }
-    // Four always-visible access filters, each an AXButton whose label is "标题，N 台".
+    // One capsule next to search; options are created only while its popover is open.
+    let trigger: (AXUIElement) -> AXUIElement? = { root in
+        descendants(root).first {
+            attribute($0, kAXRoleAttribute) == "AXButton" &&
+            attribute($0, kAXDescriptionAttribute) == "接入类型筛选"
+        }
+    }
+    guard let capsule = trigger(root) else { check("接入类型胶囊", false); break }
+    if let search = descendants(root).first(where: { attribute($0, kAXRoleAttribute) == "AXTextField" }) {
+        check("搜索与接入类型同行",
+              abs(pointOf(search).y + sizeOf(search).height / 2 -
+                  pointOf(capsule).y - sizeOf(capsule).height / 2) < 3)
+    } else { check("设备搜索输入框", false) }
+    click(capsule)
+    var menu: AXUIElement?
+    guard waitFor(2, { menu = choicePopoverRoot(); return menu != nil }), let menu else {
+        check("接入类型弹出选项", false); break
+    }
     let filterButton: (String, AXUIElement) -> AXUIElement? = { title, root in
         descendants(root).first {
             attribute($0, kAXRoleAttribute) == "AXButton" &&
@@ -955,25 +1010,31 @@ case "devices-filter-select":
         }
     }
     let titles = ["全部", "2.4Ghz", "5.0Ghz", "以太网"]
-    let missing = titles.filter { filterButton($0, root) == nil }
-    check("四个接入类型筛选常驻", missing.isEmpty, missing.joined(separator: ", "))
-    guard let five = filterButton("5.0Ghz", root) else { print("  FAIL filter button missing"); break }
+    let missing = titles.filter { filterButton($0, menu) == nil }
+    check("四个接入类型弹出选项", missing.isEmpty, missing.joined(separator: ", "))
+    check("接入类型当前项唯一", buttons(in: menu).filter { attribute($0, kAXValueAttribute) == "已选择" }.count == 1)
+    guard let five = filterButton("5.0Ghz", menu) else { print("  FAIL filter button missing"); break }
+    let expectedCount = attribute(five, kAXDescriptionAttribute).split(separator: "，").last?
+        .replacingOccurrences(of: " 台", with: "")
     click(five)
-    usleep(900_000)
+    _ = waitFor(2, { choicePopoverRoot() == nil })
     let filtered = descendants(popoverRoot() ?? root).flatMap {
         [attribute($0, kAXDescriptionAttribute), attribute($0, kAXValueAttribute)]
     }
     let counts = filtered.filter { $0.contains("/") && $0.contains("台") }
     check("筛选切到 5.0Ghz", !counts.isEmpty, counts.first ?? "no count")
-    let narrowed = counts.contains { value in
-        let digits = value.replacingOccurrences(of: " 台", with: "").split(separator: "/")
-        guard digits.count == 2, let shown = Int(digits[0]), let total = Int(digits[1]) else { return false }
-        return shown > 0 && shown < total
-    }
-    check("设备列表按 5.0Ghz 过滤", narrowed, counts.first ?? "no count")
+    check("设备列表按 5.0Ghz 过滤", expectedCount.map { expected in
+        counts.contains { $0.hasPrefix(expected + "/") }
+    } ?? false, counts.first ?? "no count")
     // Restore the default filter for subsequent scenarios.
-    if let all = filterButton("全部", popoverRoot() ?? root) {
-        click(all); usleep(500_000)
+    if let capsule = trigger(popoverRoot() ?? root) {
+        click(capsule)
+        var reopened: AXUIElement?
+        if waitFor(2, { reopened = choicePopoverRoot(); return reopened != nil }),
+           let reopened, let all = filterButton("全部", reopened) {
+            click(all)
+            _ = waitFor(2, { choicePopoverRoot() == nil })
+        }
     }
 
 case "fan-layout":
@@ -1045,6 +1106,11 @@ case "fan-mode":
         }
     }
     guard let fan = fanButton() else { print("  FAIL 风扇按钮缺失"); break }
+    let originalLabel = attribute(fan, kAXDescriptionAttribute)
+    let titles = ["标准模式", "静音模式", "性能模式"]
+    guard let originalIndex = titles.firstIndex(where: { originalLabel.contains($0) }) else {
+        check("已知原始风扇模式，允许验证后恢复", false); break
+    }
     check("风扇入口存在", true)
     click(fan)
     usleep(700_000)
@@ -1056,18 +1122,17 @@ case "fan-mode":
     check("切换为静音模式", silent.contains { $0.contains("风扇模式：静音模式") }
           || silent.contains { $0.contains("风扇已切换为静音模式") },
           silent.first { $0.contains("风扇") } ?? "no text")
-    // Restore the standard mode so the device is left as found.
+    // Restore the confirmed original mode; never assume it started in standard mode.
     if let fan = fanButton() {
         click(fan)
         usleep(700_000)
         if let menu = fanMenuWindowFrame() {
-            click(at: CGPoint(x: menu.midX, y: menu.minY + menu.height * 0.2))  // 第一行：标准
+            click(at: CGPoint(x: menu.midX, y: menu.minY + menu.height * (Double(originalIndex) + 0.5) / 3))  // 原始模式对应的行
             usleep(1_800_000)
         }
     }
     let restored = fanTexts()
-    check("恢复标准模式", restored.contains { $0.contains("风扇模式：标准模式") }
-          || restored.contains { $0.contains("风扇已切换为标准模式") },
+    check("恢复原始风扇模式", restored.contains { $0.contains("风扇模式：" + titles[originalIndex]) },
           restored.first { $0.contains("风扇") } ?? "no text")
 
 case "compose-dump":
@@ -1227,8 +1292,11 @@ case "controls":
     }
     let initial = texts()
     check("上行模式矩阵可见", initial.contains { $0.contains("蜂窝上行") })
-    check("主 SSID 常驻", initial.contains { $0.contains("FHCPE-Xe3P-SmartHome") })
-    check("备用 SSID 默认折叠", !initial.contains { $0.contains("FHCPE-Xe3P-2") })
+    let primaryCount = descendants(root).filter {
+        attribute($0, kAXRoleAttribute) == "AXButton" && attribute($0, kAXDescriptionAttribute).contains("点击改名")
+    }.count
+    check("主 SSID 常驻", primaryCount > 0)
+    check("访客 Wi-Fi 默认折叠", initial.contains { $0.contains("访客 Wi-Fi") && $0.contains("已折叠") })
     check("风扇入口存在", initial.contains { $0.contains("风扇模式：") })
     check("指示灯与风扇无副描述", !initial.contains { $0.contains("平衡散热与静音") || $0.contains("开启 · 关闭后熄灭") })
     check("MLO 预留入口", initial.contains { $0.contains("MLO 多链路聚合") })
@@ -1236,15 +1304,18 @@ case "controls":
 
     // Expand the backup channels.
     if let toggle = descendants(root).first(where: {
-        attribute($0, kAXDescriptionAttribute).contains("备用通道")
+        attribute($0, kAXDescriptionAttribute).contains("访客 Wi-Fi")
     }) {
         _ = AXUIElementPerformAction(toggle, kAXPressAction as CFString)
         usleep(600_000)
-        check("展开后出现备用 SSID", texts().contains { $0.contains("FHCPE-Xe3P-2") })
+        let expandedCount = (popoverRoot().map(descendants) ?? []).filter {
+            attribute($0, kAXRoleAttribute) == "AXButton" && attribute($0, kAXDescriptionAttribute).contains("点击改名")
+        }.count
+        check("展开后出现访客 SSID", expandedCount > primaryCount)
         _ = AXUIElementPerformAction(toggle, kAXPressAction as CFString)
         usleep(500_000)
     } else {
-        check("展开后出现备用 SSID", false, "toggle missing")
+        check("展开后出现访客 SSID", false, "toggle missing")
     }
 
     // Expand the scheduled-reboot card.
@@ -1258,6 +1329,23 @@ case "controls":
     check("重启卡片展开出时间与周期",
           !expandedBefore && texts().contains { $0.contains("重启时间") })
 
+case "layout":
+    resetUI(); openPopover(); activateApp()
+    for (key, title) in [(CGKeyCode(18), "概览"), (19, "设备"), (20, "控制"), (21, "短信")] {
+        pressKey(key, flags: .maskCommand)
+        guard waitFor(2, { popoverRoot() != nil }), let root = popoverRoot() else {
+            check("\(title) 页面可访问", false); continue
+        }
+        let all = descendants(root)
+        check("\(title) 全局标题唯一", all.filter { attribute($0, kAXValueAttribute) == "FiberHome CPE Manager" }.count == 1)
+        let horizontal = all.filter {
+            attribute($0, kAXRoleAttribute) == "AXScrollBar" &&
+            attribute($0, kAXOrientationAttribute) == "AXHorizontalOrientation" &&
+            boolAttribute($0, kAXEnabledAttribute) == true && sizeOf($0).width > 2
+        }
+        check("\(title) 无横向滚动条", horizontal.isEmpty)
+    }
+
 case "mobile":
     resetUI()
     openPopover()
@@ -1265,15 +1353,31 @@ case "mobile":
     pressKey(20, flags: .maskCommand)
     usleep(900_000)
     guard let root = popoverRoot() else { print("  FAIL no popover"); break }
+    scrollPageToBottom(root)
     let values = descendants(root).flatMap {
         [attribute($0, kAXDescriptionAttribute), attribute($0, kAXValueAttribute)]
     }
     check("移动网络区可见", values.contains("移动网络"))
     check("飞行模式入口", values.contains("飞行模式"))
     check("蜂窝数据入口", values.contains("蜂窝数据"))
-    check("外置天线入口", values.contains("外置天线"))
-    check("天线类型入口", values.contains("天线类型"))
+    check("天线不再使用开关", !descendants(root).contains {
+        attribute($0, kAXRoleAttribute) == "AXCheckBox" && attribute($0, kAXDescriptionAttribute).contains("外置天线")
+    })
     check("网络服务入口", values.contains { $0.contains("DDNS 设置") } && values.contains { $0.contains("端口映射") })
+    guard let antenna = descendants(root).first(where: {
+        attribute($0, kAXRoleAttribute) == "AXButton" &&
+        attribute($0, kAXDescriptionAttribute).hasPrefix("5G NR 外置天线：")
+    }) else { check("天线弹出选择入口", false); break }
+    _ = AXUIElementPerformAction(antenna, kAXPressAction as CFString)
+    guard waitFor(2.5, { choicePopoverRoot() != nil }), let menu = choicePopoverRoot() else {
+        check("天线菜单展开", false); break
+    }
+    let options = descendants(menu).filter { attribute($0, kAXRoleAttribute) == "AXButton" }
+    check("天线四个选项", ["关闭", "自动", "N41", "N78/N77"].allSatisfy { title in
+        options.contains { attribute($0, kAXDescriptionAttribute) == title }
+    })
+    check("天线仅当前项选中", options.filter { attribute($0, kAXValueAttribute) == "已选择" }.count == 1)
+    pressKey(53) // Close without changing the device configuration.
 
 case "advanced":
     resetUI()
@@ -1282,6 +1386,7 @@ case "advanced":
     pressKey(20, flags: .maskCommand)
     usleep(900_000)
     guard let root = popoverRoot() else { print("  FAIL no popover"); break }
+    scrollPageToBottom(root)
     guard let ddns = descendants(root).first(where: {
         attribute($0, kAXRoleAttribute) == "AXButton" &&
         attribute($0, kAXDescriptionAttribute).contains("DDNS 设置")
@@ -1347,7 +1452,7 @@ case "keys":
     // ⌘1…⌘4 switch the bottom tabs (US layout key codes 18…21).
     let tabKeys: [(CGKeyCode, String, String)] = [
         (18, "概览", "蜂窝信息"), (19, "设备", "全部"),
-        (20, "控制", "上行运行模式"), (21, "短信", "新消息")
+        (20, "控制", "上网运行模式"), (21, "短信", "新消息")
     ]
     for (code, name, marker) in tabKeys {
         pressKey(code, flags: .maskCommand)
@@ -1362,7 +1467,7 @@ case "keys":
     // Esc inside a drill-in page returns instead of closing the panel.
     pressKey(18, flags: .maskCommand); usleep(500_000)
     if let detail = descendants(popoverRoot() ?? AXUIElementCreateSystemWide()).first(where: {
-        attribute($0, kAXDescriptionAttribute).contains("蜂窝详情")
+        attribute($0, kAXDescriptionAttribute) == "更多"
     }) {
         _ = AXUIElementPerformAction(detail, kAXPressAction as CFString)
         usleep(900_000)
@@ -1570,7 +1675,7 @@ case "screens":
     if let root = popoverRoot() {
         // The detail entry is now a compact header action rather than a full-width row.
         let candidates = descendants(root).filter { attribute($0, kAXRoleAttribute) == "AXButton" }
-        let more = candidates.first { attribute($0, kAXDescriptionAttribute).contains("蜂窝详情") }
+        let more = candidates.first { attribute($0, kAXDescriptionAttribute) == "更多" }
             ?? candidates.first { attribute($0, kAXDescriptionAttribute).contains("详情") }
         if let more {
             _ = AXUIElementPerformAction(more, kAXPressAction as CFString)

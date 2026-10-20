@@ -186,6 +186,25 @@ struct DHCPReservationTests {
         #expect(await rpc.calls.count == 1)
     }
 
+    @Test func cleanupDeletesOnlyItsConfirmedBindingAndChecksTheTable() async throws {
+        let rpc = DHCPReservationRPC(replies: [table(index: "17", ip: "192.168.8.120"),
+                                              .strings(["success": "true"]), table()])
+        let binding = try DHCPReservation(mac: "02:AA:BB:CC:DD:EE", ip: "192.168.8.120", index: 17)
+        try await DHCPReservationService(rpc: rpc).remove(binding)
+        let calls = await rpc.calls
+        #expect(calls.map(\.method) == ["get_xml_childnode_value", "del_xmlnode", "get_xml_childnode_value"])
+        #expect(calls[1].data == .object([
+            "url": .string("LANDevice.1.LANHostConfigManagement.X_FH_StaticDhcp"), "index": .number(17)
+        ]))
+    }
+
+    @Test func cleanupCannotDeleteAConcurrentlyChangedBinding() async throws {
+        let rpc = DHCPReservationRPC(replies: [table(index: "17", ip: "192.168.8.130")])
+        let binding = try DHCPReservation(mac: "02:AA:BB:CC:DD:EE", ip: "192.168.8.120", index: 17)
+        await #expect(throws: CPEError.uncertain) { try await DHCPReservationService(rpc: rpc).remove(binding) }
+        #expect(await rpc.calls.count == 1)
+    }
+
     private func table(index: String? = nil, mac: String = "02:AA:BB:CC:DD:EE", ip: String = "") -> JSONValue {
         let rows: [JSONValue] = index.map { [.strings(["child_node_idx": $0, "mac": mac, "ip": ip])] } ?? []
         return .object(["data": .array(rows)])

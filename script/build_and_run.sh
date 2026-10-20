@@ -17,9 +17,9 @@ mkdir -p .build/tmp .build/mcache
 export CLANG_MODULE_CACHE_PATH="$PWD/.build/mcache"
 export SWIFT_MODULE_CACHE_PATH="$PWD/.build/mcache"
 
-swift build --disable-sandbox --scratch-path .build --product FiberHomeCPEManager
-swift build --disable-sandbox --scratch-path .build --product FiberHomeCPEManagerWidget
-bin="$(swift build --disable-sandbox --scratch-path .build --show-bin-path)"
+swift build --disable-sandbox --scratch-path .build --arch arm64 --product FiberHomeCPEManager
+swift build --disable-sandbox --scratch-path .build --arch arm64 --product FiberHomeCPEManagerWidget
+bin="$(swift build --disable-sandbox --scratch-path .build --arch arm64 --show-bin-path)"
 
 app="$PWD/build/FiberHomeCPEManager.app"
 ext="$app/Contents/PlugIns/FiberHomeCPEManagerWidget.appex"

@@ -20,6 +20,7 @@ public actor LocalTransport: DeviceRPC {
     /// Callers now queue.
     private var inFlight = false
     private var closed = false
+    private var supportsActivityRenewal = true
     private var waiters: [CheckedContinuation<Void, Never>] = []
     public init(address: DeviceAddress) {
         self.address = address
@@ -30,6 +31,32 @@ public actor LocalTransport: DeviceRPC {
         session = URLSession(configuration: config, delegate: RedirectBlocker(), delegateQueue: nil)
     }
     public func close() { closed = true; session.invalidateAndCancel(); seed = nil }
+
+    /// Check authentication, then renew the firmware's idle deadline using WebUI's
+    /// activity endpoint. Heartbeat and ordinary RPC reads do not renew that deadline.
+    public func keepAlive() async throws {
+        await acquire()
+        defer { release() }
+        try Task.checkCancellation()
+        guard !closed else { throw CancellationError() }
+        try Self.validateHeartbeat(await request("/fh_api/tmp/heartbeat"))
+        if supportsActivityRenewal {
+            do {
+                // RP0112 returns HTTP 200 with an empty body for successful renewal.
+                _ = try await request("/fh_api/tmp/refresh_timeout")
+            } catch CPEError.http(let status) where [400, 404, 405, 501].contains(status) {
+                supportsActivityRenewal = false
+            }
+        }
+    }
+
+    static func validateHeartbeat(_ data: Data) throws {
+        let value = String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        if value == "1" { return }
+        if value == "0" { throw CPEError.authentication }
+        _ = try decodeObject(data)
+        throw CPEError.malformedResponse
+    }
     private func request(_ path: String, body: Data? = nil) async throws -> Data {
         guard let url = URL(string: path, relativeTo: address.url)?.absoluteURL,
               url.host == address.url.host, url.scheme == address.url.scheme, url.port == address.url.port else { throw CPEError.invalidAddress }
@@ -97,7 +124,7 @@ public actor LocalTransport: DeviceRPC {
             // Distinguish a real malformed SMS payload from a displaced/expired session.
             // This extra read is only made on a decoding failure, never for every sample.
             if !publicAccess {
-                do { _ = try await request("/fh_api/tmp/heartbeat") }
+                do { try Self.validateHeartbeat(await request("/fh_api/tmp/heartbeat")) }
                 catch CPEError.authentication { throw CPEError.authentication }
                 catch { /* Preserve the original decoding error. */ }
             }

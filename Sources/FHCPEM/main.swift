@@ -41,13 +41,22 @@ struct FiberHomeCPEManagerApp {
 /// One `NSStatusItem` plus one `NSPopover` solves both and is the documented pattern for
 /// menu-bar utilities.
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
+    private struct StatusImageKey: Equatable {
+        let style: MenuBarStyle
+        let level: Int?
+        let text: String
+        let connected: Bool
+    }
+    private var lastStatusImageKey: StatusImageKey?
     private var statusItem: NSStatusItem?
     private var popover: NSPopover?
     private var store: AppStore?
     private var eventMonitor: Any?
     private var localEventMonitor: Any?
     private var keyMonitor: Any?
+    private var trackingMenus = Set<ObjectIdentifier>()
+    private var menuObservers: [NSObjectProtocol] = []
     /// When the popover was last shown, used to ignore the click that opened it.
     private var popoverOpenedAt = Date.distantPast
 
@@ -65,19 +74,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Silent sign-in for users who opted into the Keychain: the panel then opens on
         // 概览 instead of the login form.
         store.restoreSavedSessionIfRequested()
+        observeMenuTracking()
         // A left-click elsewhere dismisses the popover, like a native menu extra.
         eventMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
-            Task { @MainActor in self?.closePopoverIfNeeded() }
+            MainActor.assumeIsolated { self?.closePopoverIfNeeded(at: NSEvent.mouseLocation) }
         }
         localEventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] event in
-            Task { @MainActor in self?.closePopoverIfNeeded() }
+            MainActor.assumeIsolated {
+                self?.closePopoverIfNeeded(at: NSEvent.mouseLocation, eventWindow: event.window)
+            }
             return event
         }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 
-    func applicationWillTerminate(_ notification: Notification) { store?.shutdown() }
+    func applicationWillTerminate(_ notification: Notification) {
+        menuObservers.forEach(NotificationCenter.default.removeObserver)
+        store?.shutdown()
+    }
+
+    private func observeMenuTracking() {
+        for name in [NSMenu.didBeginTrackingNotification, NSMenu.didEndTrackingNotification] {
+            menuObservers.append(NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] note in
+                guard let menu = note.object as? NSMenu else { return }
+                let identity = ObjectIdentifier(menu)
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    if name == NSMenu.didBeginTrackingNotification {
+                        self.trackingMenus.insert(identity)
+                    } else {
+                        self.trackingMenus.remove(identity)
+                    }
+                }
+            })
+        }
+    }
 
     // MARK: Status item
 
@@ -130,13 +162,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Redraws the menu-bar bitmap. Called on every sample and on style changes.
     func refreshStatusItem() {
         guard let button = statusItem?.button, let store else { return }
-        let image = MenuBarGlyph.image(style: store.menuBarStyle,
-                                       level: store.menuSignalLevel,
-                                       text: store.menuLabelText,
-                                       connected: store.model.data.connected)
-        button.image = image
+        let key = StatusImageKey(style: store.menuBarStyle, level: store.menuSignalLevel,
+                                 text: store.menuLabelText, connected: store.model.data.connected)
+        if key != lastStatusImageKey || button.image == nil {
+            button.image = MenuBarGlyph.image(style: key.style, level: key.level,
+                                              text: key.text, connected: key.connected)
+            lastStatusImageKey = key
+        }
         button.setAccessibilityLabel(store.menuAccessibilityLabel)
-        statusItem?.length = MenuBarGlyph.width(for: store.menuBarStyle) + 12
+        statusItem?.length = MenuBarGeometry.statusItemWidth(for: store.menuBarStyle)
     }
 
     // MARK: Popover
@@ -153,28 +187,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // another app, the desktop and the system menu bar.
         popover.behavior = .applicationDefined
         popover.animates = true
-        // `NSPopover` always lays a 13 pt arrow margin on each edge: a 340x560 content
-        // presents as a 366x586 window (measured). That chrome is fixed by the platform,
-        // so the popover is asked for exactly the design size and the extra margin simply
-        // frames it; the content area itself stays 340x560.
-        let hosting = NSHostingController(
-            rootView: ShellView(model: store.model)
-                .frame(width: Theme.compactWidth, height: Theme.compactHeight)
+        // Keep the native background extension around the fixed page canvas.
+        // ShellView handles the arrow safe area separately from its scroll content.
+        let hosting = PopoverHostingController(
+            rootView: ShellView(model: store.model),
+            designSize: NSSize(width: Theme.compactWidth, height: Theme.compactHeight)
         )
         hosting.sizingOptions = []
         hosting.view.frame = NSRect(x: 0, y: 0, width: Theme.compactWidth, height: Theme.compactHeight)
         popover.contentSize = NSSize(width: Theme.compactWidth, height: Theme.compactHeight)
         popover.contentViewController = hosting
         popover.hasFullSizeContent = true
+        popover.delegate = self
         self.popover = popover
-        store.onPopoverVisibilityChanged = { visible in
-            // The store owns the refresh cadence; the delegate only reports visibility.
-            if visible { store.activate() } else { store.deactivate() }
-        }
         store.onStatusItemNeedsUpdate = { [weak self] in self?.refreshStatusItem() }
         installMainMenu()
         installKeyboardShortcuts()
     }
+
+    func popoverDidShow(_ notification: Notification) { store?.setPopoverVisible(true) }
+
+    func popoverWillClose(_ notification: Notification) { store?.setPopoverVisible(false) }
 
     /// Installs an application menu that is never displayed.
     ///
@@ -233,12 +266,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func installKeyboardShortcuts() {
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self else { return event }
+            // Menus and attached editors consume their own Esc before the main panel.
+            guard self.trackingMenus.isEmpty else { return event }
             let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
             let isEscape = event.keyCode == 53
             let isCommand = flags.contains(.command)
 
             // Esc walks back through the navigation stack before it dismisses the panel.
             if isEscape {
+                if self.popover?.contentViewController?.view.window?.attachedSheet != nil { return event }
+                if let window = event.window,
+                   window !== self.popover?.contentViewController?.view.window,
+                   self.belongsToPopover(window) { return event }
                 if self.popover?.isShown == true {
                     if self.goBackIfPossible() { return nil }
                     self.popover?.performClose(nil)
@@ -327,13 +366,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     ///
     /// The status-item button and its menu are excluded: clicking those must go through the
     /// normal toggle/menu paths instead of being swallowed by a close.
-    private func closePopoverIfNeeded() {
+    private func belongsToPopover(_ window: NSWindow) -> Bool {
+        guard let root = popover?.contentViewController?.view.window else { return false }
+        var candidate: NSWindow? = window
+        while let current = candidate {
+            if current === root { return true }
+            candidate = current.parent ?? current.sheetParent
+        }
+        return false
+    }
+
+    private func closePopoverIfNeeded(at location: NSPoint, eventWindow: NSWindow? = nil) {
         guard let popover, popover.isShown else { return }
-        // The click monitors fire on mouse-down and are dispatched asynchronously, so the
-        // close could otherwise run *after* the status-item action opened the panel — which
-        // made the panel impossible to open at all. Ignore the click that opened it.
+        guard trackingMenus.isEmpty else { return }
+        if let eventWindow, belongsToPopover(eventWindow) { return }
+        // Use the position of this click, before menu tracking can move the pointer.
         guard Date().timeIntervalSince(popoverOpenedAt) > 0.25 else { return }
-        let location = NSEvent.mouseLocation
         if let window = popover.contentViewController?.view.window, window.frame.contains(location) {
             return
         }
@@ -435,7 +483,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var refreshTask: Task<Void, Never>?
     private var connectionTask: Task<Void, Never>?
     private var generation = UUID()
-    private var visibleObservers = 0
     private var currentCredentials: Credentials?
     private var activeSessionID: UUID?
     /// Invalidated on every outage as well as reconnect. Late secondary reads cannot
@@ -450,21 +497,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var ddnsReadInFlight = false
     private var portMappingReadInFlight = false
     private var advancedMutationInFlight = false
-    /// Settings are a *separate* data source from the 1 Hz traffic sample. Background reads
+    /// Settings are a separate data source from the traffic sample. Background reads
     /// never toggle the switches or replace an equal value; only a user write sets
     /// settingsBusy. This is what stopped the control page from flickering every second.
     private var settingsReadInFlight = false
     private var settingsGeneration = 0
     private var lastSettingsReadAt = Date.distantPast
-    private static let settingsRefreshInterval: TimeInterval = 10
+    private static let settingsRefreshInterval = SessionRefreshPolicy.dataInterval
     /// SMS is polled through the device API while its page is visible. Nothing is written to
     /// disk: the array is in-memory state, refreshed from get_sms_data.
-    private var smsQuietReadInFlight = false
+    private var smsRefreshQueue = SMSRefreshQueue()
     private var lastSMSReadAt = Date.distantPast
+    private var popoverVisible = false
 
     private let keychain = CredentialStore()
-    /// Set by the delegate; invoked when the popover appears/disappears.
-    var onPopoverVisibilityChanged: ((Bool) -> Void)?
     /// Set by the delegate; invoked after every sample so the status item redraws.
     var onStatusItemNeedsUpdate: (() -> Void)?
 
@@ -544,7 +590,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.model.route = .main
             self?.model.advancedStatus = nil
         }
-        model.reloadDDNS = { [weak self] in self?.reloadDDNS() }
+        model.reloadDDNS = { [weak self] in
+            self?.model.advancedStatus = nil
+            self?.reloadDDNS()
+        }
         model.saveDDNS = { [weak self] entry, input in
             guard let self else { throw CancellationError() }
             try await self.saveDDNS(entry, input)
@@ -568,7 +617,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.model.route = .main
             self?.model.advancedStatus = nil
         }
-        model.reloadPortMappings = { [weak self] in self?.reloadPortMappings() }
+        model.reloadPortMappings = { [weak self] in
+            self?.model.advancedStatus = nil
+            self?.reloadPortMappings()
+        }
         model.addPortMapping = { [weak self] input in
             guard let self else { throw CancellationError() }
             try await self.addPortMapping(input)
@@ -614,17 +666,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.reloadDDNS()
             self?.reloadPortMappings()
         }
-        model.onSMSSelected = { [weak self] in self?.reloadMessages(quiet: true) }
+        model.onSMSSelected = { [weak self] in
+            self?.markVisibleThreadRead()
+            self?.reloadMessages(quiet: true)
+        }
     }
 
     func activate() {
-        visibleObservers += 1
-        startRefresh(fast: true)
-        Task { await refreshOnce() }
+        // Opening the panel must not cancel a protected read already in flight.
+        // The same loop runs while the popover is closed.
+        startRefresh()
     }
 
-    func deactivate() {
-        visibleObservers = max(0, visibleObservers - 1)
+    /// AppKit reports the actual panel lifetime. A retained conversation route while the
+    /// panel is closed must not consume incoming messages that the user has not seen.
+    func setPopoverVisible(_ visible: Bool) {
+        popoverVisible = visible
+        guard visible else { return }
+        activate()
+        if model.route == .main, model.tab == 3 {
+            markVisibleThreadRead()
+            reloadMessages(quiet: true)
+        }
+    }
+
+    private var visibleSMSConversationID: String? {
+        guard popoverVisible, model.route == .main, model.tab == 3,
+              model.smsRoute != .threads else { return nil }
+        if let selected = model.selectedThreadID { return selected }
+        let number = model.draftNumber.trimmingCharacters(in: .whitespacesAndNewlines)
+        return number.isEmpty ? nil : number
+    }
+
+    private func markVisibleThreadRead() {
+        guard let phone = visibleSMSConversationID,
+              let thread = model.threads.first(where: { $0.id == phone }) else { return }
+        markThreadRead(thread)
     }
 
     // MARK: Menu-bar text
@@ -649,7 +726,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func startMenuBarRefresh() {
-        if refreshTask == nil { startRefresh(fast: false) }
+        startRefresh()
     }
 
     // MARK: Connection
@@ -686,12 +763,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// Removes the stored credential and turns the opt-in off.
     func forgetCredential() {
+        keychainSnapshot = nil
+        preferences.rememberConnection = false
+        model.savePassword = false
+        model.draftPassword = ""
+        currentCredentials = nil
         do {
             try keychain.delete()
-            keychainSnapshot = nil
-            preferences.rememberConnection = false
-            model.savePassword = false
-            currentCredentials = nil
             model.statusMessage = "已清除保存的密码，下次需要手动登录"
         } catch {
             model.statusMessage = "未能清除钥匙串条目：\(error.localizedDescription)"
@@ -711,8 +789,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     ///
     /// Why so conservative: the app is sandboxed and ad-hoc signed, so each rebuild changes
     /// its code signature and the keychain ACL stops matching. macOS then asks for
-    /// approval on *every* keychain access. Reading it once at launch (and never in a loop)
-    /// keeps that to a single prompt at worst, instead of an endless stream.
+    /// authorization for an old item. The store forbids authentication UI; an unavailable
+    /// item therefore returns an error once and leaves the user on the connection form.
     private func loadSavedCredentialIfAny() {
         guard !didAttemptKeychainLoad else { return }
         didAttemptKeychainLoad = true
@@ -729,6 +807,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // A denied or missing item is not fatal: fall back to manual entry.
             keychainLoadFailed = true
             preferences.rememberConnection = false
+            model.savePassword = false
             model.statusMessage = "无法读取已保存的连接，请重新输入密码。"
         }
     }
@@ -788,9 +867,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // session keeps its own copy for reconnects, and a failed attempt must not
                 // leave a secret sitting in a visible field.
                 self.model.draftPassword = ""
-                self.startRefresh(fast: self.visibleObservers > 0)
+                self.startRefresh()
                 self.onStatusItemNeedsUpdate?()
-                self.onPopoverVisibilityChanged?(true)
                 // Conversations come from `get_sms_data`; load them once the session is live
                 // so the SMS tab is populated before the user opens it.
                 self.reloadMessages()
@@ -838,7 +916,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 if self.uplinkOperationID == operationID {
                     self.uplinkOperationID = nil
                     self.model.settingsBusy = false; self.model.uplinkSwitchTarget = nil
-                    self.startRefresh(fast: self.visibleObservers > 0)
+                    self.startRefresh()
                 }
             }
             do {
@@ -905,7 +983,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 let reading = try await fresh.connect(username: credentials.username,
                                                       password: credentials.password)
                 guard generation == originalID, activeSessionID == originalID else { await fresh.close(); return nil }
-                refreshTask?.cancel()
+                refreshTask?.cancel(); refreshTask = nil
                 await session?.close()
                 session = fresh
                 let newID = UUID()
@@ -919,7 +997,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 reloadSettings()
                 reloadRadioLocks()
                 reloadMessages()
-                startRefresh(fast: visibleObservers > 0)
+                startRefresh()
                 onStatusItemNeedsUpdate?()
                 return newID
             } catch {
@@ -956,6 +1034,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } catch {
             // A Keychain failure must not break a working session; report it instead.
             preferences.rememberConnection = false
+            model.savePassword = false
             model.statusMessage = "未能写入钥匙串：\(error.localizedDescription)"
         }
     }
@@ -988,7 +1067,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         model.lanAddress = ""
         settingsGeneration += 1
         radioReadGeneration += 1
-        settingsReadInFlight = false; smsQuietReadInFlight = false; radioReadInFlight = false
+        settingsReadInFlight = false; smsRefreshQueue = SMSRefreshQueue(); radioReadInFlight = false
         mobileReadGeneration += 1
         mobileReadInFlight = false; ddnsReadInFlight = false; portMappingReadInFlight = false
         advancedMutationInFlight = false
@@ -999,7 +1078,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         onStatusItemNeedsUpdate?()
     }
 
-    /// Returns true when the caller must stop publishing its result/banner.
+    /// Returns true when the caller must stop publishing its result or reminder.
     @discardableResult
     private func handleSessionFailure(_ error: Error, id: UUID, epoch: UUID, primaryRead: Bool = false) -> Bool {
         guard isCurrent(id, epoch: epoch) else { return true }
@@ -1023,28 +1102,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: Refresh
 
-    /// One second while the popover is open, and the same cadence for the menu-bar label
+    /// Three seconds while the popover is open, and the same cadence for the menu-bar label
     /// so the reading does not visibly freeze when the popover closes. Only one request
     /// batch is ever in flight (`DeviceSession` serialises and rejects re-entry).
-    func startRefresh(fast: Bool) {
-        refreshTask?.cancel()
-        guard session != nil else { return }
+    func startRefresh() {
+        guard refreshTask == nil, session != nil else { return }
         refreshTask = Task { [weak self] in
+            let clock = ContinuousClock()
             while !Task.isCancelled {
                 guard let self else { return }
+                let started = clock.now
                 await self.refreshOnce()
-                let interval: Duration = .seconds(self.model.data.connected ? 1 : 5)
-                try? await Task.sleep(for: interval)
+                let interval = SessionRefreshPolicy.sampleInterval(connected: self.model.data.connected)
+                try? await clock.sleep(until: started.advanced(by: interval))
             }
         }
     }
 
-    /// One traffic sample. Settings are refreshed separately and at a much lower cadence:
+    /// One traffic sample. Settings are read separately when relevant:
     /// - on entering the Controls tab (ShellView's onChange)
     /// - on a manual refresh (⌘R / context menu / empty-state reload)
-    /// - at most once every 10 s while the Controls tab is visible, silently
+    /// - every 3 s while the Controls tab is visible, silently
     ///
-    /// They are never read at 1 Hz, and a background read never sets settingsBusy, so the
+    /// A background read never sets settingsBusy, so the
     /// switches no longer dim/flicker in time with the traffic refresh.
     func refreshOnce(includeSettings: Bool = false) async {
         guard let session, let id = activeSessionID, !model.busy, uplinkOperationID == nil else { return }
@@ -1070,9 +1150,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 if model.route == .ddns { reloadDDNS() }
                 if model.route == .portMapping { reloadPortMappings() }
             }
-            // The SMS page hits `get_sms_data` at least once every 5 seconds while visible,
+            // The SMS page hits `get_sms_data` every 3 seconds while visible,
             // AND immediately whenever the device's reported `smsCount` changes.
-            let smsVisible = model.route == .main && model.tab == 3
+            let smsVisible = popoverVisible && model.route == .main && model.tab == 3
             let smsCountChanged = reading.snapshot.smsCount != previousSMSCount
             if !wasLive || smsCountChanged || (smsVisible && SMSRefreshPolicy.isDue(lastRead: lastSMSReadAt)) {
                 reloadMessages(quiet: true)
@@ -1086,16 +1166,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func apply(_ reading: SessionReading) {
-        model.data = PageData(snapshot: reading.snapshot,
-                              devices: reading.devices,
-                              stale: false,
-                              connected: true)
+        let nextData = PageData(snapshot: reading.snapshot, devices: reading.devices,
+                                stale: false, connected: true)
+        if model.data != nextData { model.data = nextData }
         // Assigning an equal array still re-renders every row; an open context menu is rebuilt
         // by that and closes, so publish only real changes.
         if model.devices != reading.devices { model.devices = reading.devices }
-        model.cells = reading.snapshot.cells.isEmpty
+        let nextCells = reading.snapshot.cells.isEmpty
             ? servingOnly(reading.snapshot)
             : reading.snapshot.cells
+        if model.cells != nextCells { model.cells = nextCells }
         model.lockMode = model.radioLocks?.mode ?? reading.snapshot.lockMode
         model.lanAddress = currentCredentials.flatMap { try? DeviceAddress($0.address).hostText } ?? ""
         model.statusMessage = nil
@@ -1130,7 +1210,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: Secondary actions
 
     /// Enables/disables one SSID. The switch is optimistic in the UI, then the device is
-    /// re-read; a rejected write snaps it back with a visible error banner.
+    /// re-read; a rejected write snaps it back with an error reminder.
     private func toggleSSID(_ network: WiFiNetwork, enabled: Bool) {
         mutateSettings(enabled ? "已开启 \(network.ssid)" : "已关闭 \(network.ssid)") { session in
             try await session.setSSIDEnabled(index: network.id, enabled: enabled)
@@ -1184,34 +1264,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Loads conversations through the firmware's own get_sms_data method.
     ///
     /// - Parameters:
-    ///   - keepStatus: leave the current send/result banner alone.
+    ///   - keepStatus: leave the current send/result feedback alone.
     ///   - quiet: background poll. It never sets smsBusy, so the reply field and buttons do
-    ///     not flicker; failures keep the last good conversation list instead of replacing
-    ///     it with an error. The array is in-memory only — no local storage.
+    ///     not flicker. The array is in-memory only — no local storage.
     ///
     /// Sent messages are appended optimistically, because the firmware can take a moment to
     /// include them in get_sms_data. A reload merges the device list with those pending
     /// local bubbles instead of replacing them, so the just-sent message never disappears
     /// and then reappears ("发送后不同步").
     func reloadMessages(keepStatus: Bool = false, quiet: Bool = false) {
-        guard let session, let id = activeSessionID, model.data.isLive else {
+        guard session != nil, activeSessionID != nil, model.data.isLive else {
             if !quiet {
                 model.smsStatus = "未连接"
                 model.smsStatusIsError = true
             }
             return
         }
+        smsRefreshQueue.request(quiet: quiet, keepStatus: keepStatus)
+        runNextSMSRead()
+    }
+
+    /// Every SMS read shares one queue. Requests arriving during a send/read are merged
+    /// into one follow-up read, so the count-change and post-send triggers cannot be lost.
+    private func runNextSMSRead() {
+        guard let session, let id = activeSessionID, model.data.isLive,
+              let request = smsRefreshQueue.beginNext(isSending: model.smsBusy) else { return }
         let epoch = dataEpoch
-        if quiet {
-            guard !smsQuietReadInFlight, !model.smsBusy else { return }
-            smsQuietReadInFlight = true
-        } else {
-            guard !model.smsBusy else { return }
-            model.smsBusy = true
-        }
-        if !keepStatus, !quiet { model.smsStatus = nil; model.smsStatusIsError = false }
+        if !request.quiet { model.smsBusy = true }
+        if !request.keepStatus, !request.quiet { model.smsStatus = nil; model.smsStatusIsError = false }
         Task { [weak self] in
             guard let self else { return }
+            defer {
+                if self.belongsToConnection(id, epoch: epoch) {
+                    self.smsRefreshQueue.finish()
+                    if !request.quiet { self.model.smsBusy = false }
+                    self.runNextSMSRead()
+                }
+            }
             do {
                 let threads = try await session.threads()
                 guard self.isCurrent(id, epoch: epoch), self.model.data.isLive else { return }
@@ -1219,11 +1308,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 if self.model.threads != merged { self.model.threads = merged }
                 self.lastSMSReadAt = Date()
                 self.model.smsLastSync = self.lastSMSReadAt
-                if quiet { self.smsQuietReadInFlight = false } else { self.model.smsBusy = false }
+                self.markVisibleThreadRead()
             } catch {
                 guard self.isCurrent(id, epoch: epoch) else { return }
                 self.lastSMSReadAt = Date()
-                if quiet { self.smsQuietReadInFlight = false } else { self.model.smsBusy = false }
                 guard !self.handleSessionFailure(error, id: id, epoch: epoch) else { return }
                 self.model.threads = []; self.model.smsLastSync = nil
                 self.model.selectedThreadID = nil; self.model.smsRoute = .threads
@@ -1259,26 +1347,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return formatter
     }()
 
-    /// Marks a conversation's received messages as read on the device.
+    /// Clears the visible conversation's badge immediately, then writes those exact
+    /// received nodes to the device. Merging a stale read cannot undo the local change.
     func markThreadRead(_ thread: SMSThread) {
-        guard let session, let id = activeSessionID, model.data.isLive else { return }
+        guard let session, let id = activeSessionID, model.data.isLive,
+              visibleSMSConversationID == thread.id,
+              let index = model.threads.firstIndex(where: { $0.id == thread.id }) else { return }
         let epoch = dataEpoch
-        let nodes = thread.messages.filter { !$0.isRead && !$0.isSent }.map { $0.childnode ?? $0.id }
+        // Resolve current state rather than the row's captured value. Multiple UI/poll
+        // callbacks then see the first optimistic update and do not repeat the write.
+        let unread = model.threads[index].messages.filter { !$0.isRead && !$0.isSent }
+        let nodes = unread.map { $0.childnode ?? $0.id }
         guard !nodes.isEmpty else { return }
+        model.threads[index] = SMSThreadMerge.settingRead(true, for: unread, in: model.threads[index])
         Task { [weak self] in
             guard let self else { return }
             do { try await session.markRead(nodes) }
             catch {
+                guard self.isCurrent(id, epoch: epoch) else { return }
+                if let index = self.model.threads.firstIndex(where: { $0.id == thread.id }) {
+                    self.model.threads[index] = SMSThreadMerge.settingRead(false, for: unread,
+                                                                         in: self.model.threads[index])
+                }
                 guard !self.handleSessionFailure(error, id: id, epoch: epoch) else { return }
                 self.model.smsStatus = "未能标记已读：\(error.localizedDescription)"
                 self.model.smsStatusIsError = true
                 return
-            }
-            guard self.isCurrent(id, epoch: epoch), let index = self.model.threads.firstIndex(where: { $0.id == thread.id }) else { return }
-            for i in self.model.threads[index].messages.indices
-            where !self.model.threads[index].messages[i].isSent
-                && nodes.contains(self.model.threads[index].messages[i].childnode ?? self.model.threads[index].messages[i].id) {
-                self.model.threads[index].messages[i].isRead = true
             }
         }
     }
@@ -1286,7 +1380,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Reads Wi-Fi / reboot / LED / fan / MLO settings from the device.
     ///
     /// - Parameter quiet: background read. It never sets settingsBusy (so switches stay
-    ///   interactive), never clears a user-facing banner, and only reports an error when
+    ///   interactive), never clears user-facing feedback, and only reports an error when
     ///   there is no previously-read settings object to keep showing.
     func reloadSettings(quiet: Bool = false) {
         guard let session, let id = activeSessionID, model.data.isLive else {
@@ -1397,13 +1491,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.model.smsRoute = .thread
                 self.model.smsStatus = "已发送至 \(thread.phone)"
                 self.model.smsStatusIsError = false
-                self.reloadMessages(keepStatus: true)
+                self.reloadMessages(keepStatus: true, quiet: true)
                 try? await Task.sleep(for: .milliseconds(1_500))
                 guard self.isCurrent(id, epoch: epoch) else { return }
-                self.reloadMessages(keepStatus: true)
+                self.reloadMessages(keepStatus: true, quiet: true)
             } catch {
                 guard self.isCurrent(id, epoch: epoch) else { return }
                 self.model.smsBusy = false
+                defer { self.runNextSMSRead() }
                 guard !self.handleSessionFailure(error, id: id, epoch: epoch) else { return }
                 self.model.smsStatus = (error as? CPEError)?.errorDescription ?? error.localizedDescription
                 self.model.smsStatusIsError = true
@@ -1436,14 +1531,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.model.smsRoute = .thread
                 self.model.smsStatus = "已发送给 \(number)"
                 self.model.smsStatusIsError = false
-                self.reloadMessages(keepStatus: true)
+                self.reloadMessages(keepStatus: true, quiet: true)
                 try? await Task.sleep(for: .milliseconds(1_500))
                 guard self.isCurrent(id, epoch: epoch) else { return }
-                self.reloadMessages(keepStatus: true)
+                self.reloadMessages(keepStatus: true, quiet: true)
             } catch {
                 guard self.isCurrent(id, epoch: epoch) else { return }
                 // The draft is kept so the user can retry or copy it out.
                 self.model.smsBusy = false
+                defer { self.runNextSMSRead() }
                 guard !self.handleSessionFailure(error, id: id, epoch: epoch) else { return }
                 self.model.smsStatus = "发送失败：\(error.localizedDescription)"
                 self.model.smsStatusIsError = true

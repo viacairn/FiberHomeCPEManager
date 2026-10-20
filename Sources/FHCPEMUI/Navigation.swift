@@ -23,7 +23,6 @@ public struct WideTabBar: View {
 
     public let items: [Item]
     @Binding public var selection: Int
-    @Namespace private var namespace
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     @Environment(\.fhcpemGlassEnabled) private var glassEnabled
 
@@ -36,7 +35,7 @@ public struct WideTabBar: View {
             ForEach(items) { item in
                 let selected = item.id == selection
                 Button {
-                    withAnimation(.smooth(duration: 0.22)) { selection = item.id }
+                    selection = item.id
                 } label: {
                     Text(item.title)
                         .font(.system(size: 12, weight: selected ? .bold : .semibold))
@@ -48,7 +47,7 @@ public struct WideTabBar: View {
                 .buttonStyle(.plain)
                 .background {
                     if selected {
-                        selectedBackground.matchedGeometryEffect(id: "selection", in: namespace)
+                        selectedBackground
                     }
                 }
                 .accessibilityLabel(item.title)

@@ -11,6 +11,13 @@ import Foundation
 /// 3. "Unknown" and "zero bars" differed by 4% alpha, making a disconnected app look as if
 ///    it had signal.
 struct MenuBarGeometryTests {
+    @Test func compactStatusSlotPreservesSignalAndRateArtwork() {
+        #expect(MenuBarGeometry.statusItemWidth(for: .signalOnly) == 22.5)
+        #expect(MenuBarGeometry.statusItemWidth(for: .signalAndRate) == 84.5)
+        #expect(MenuBarGeometry.width(for: .signalOnly) == 16.5)
+        #expect(MenuBarGeometry.numberWidth == 58)
+    }
+
     /// A half-point grid guarantees integer device pixels at 2x; anything else blurs.
     @Test func everyCoordinateSitsOnTheHalfPointGrid() {
         for value in MenuBarGeometry.gridValues {

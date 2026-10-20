@@ -2,7 +2,7 @@ import Testing
 import Foundation
 @testable import FHCPECore
 
-/// Per-host icon pins: identity, persistence and the 30-day expiry.
+/// Per-device icon pins: conservative identity, persistence and the 30-day expiry.
 @MainActor
 struct DeviceGlyphStoreTests {
     private func store() -> DeviceGlyphStore {
@@ -10,95 +10,240 @@ struct DeviceGlyphStoreTests {
         return DeviceGlyphStore(defaults: suite)
     }
 
-    private func device(_ name: String, mac: String? = nil, host: String? = nil) -> ConnectedDevice {
-        ConnectedDevice(id: name, name: name, ip: "192.168.8.10", access: .wifi24G,
+    private func device(_ name: String, mac: String? = nil, host: String? = nil,
+                        ip: String = "192.0.2.10", id: String? = nil) -> ConnectedDevice {
+        ConnectedDevice(id: id ?? name, name: name, ip: ip, access: .wifi24G,
                         mac: mac, hostname: host)
     }
 
     @Test func macWinsOverHostname() {
-        let a = device("Whatever", mac: "aa-bb-cc-dd-ee-ff")
-        #expect(DeviceGlyphStore.identity(of: a) == "mac:AA:BB:CC:DD:EE:FF")
-        let b = device("Whatever", host: "nas.local")
-        #expect(DeviceGlyphStore.identity(of: b) == "host:nas.local")
+        let a = device("Example", mac: "02-00-00-00-00-01")
+        #expect(DeviceGlyphStore.identity(of: a) == "mac:02:00:00:00:00:01")
+        let b = device("Example", host: "example.invalid")
+        #expect(DeviceGlyphStore.identity(of: b) == "host:example.invalid|ip:192.0.2.10")
     }
 
     @Test func assignmentPersists() {
         let store = store()
-        let washer = device("ESP_1", mac: "11-22-33-44-55-66")
-        store.assign(.washer, to: washer)
-        #expect(store.glyph(for: washer) == .washer)
-        store.assign(nil, to: washer)
-        #expect(store.glyph(for: washer) == nil)
+        let endpoint = device("Example", mac: "02-00-00-00-00-01")
+        store.assign(.washer, to: endpoint)
+        #expect(store.glyph(for: endpoint) == .washer)
+        store.assign(nil, to: endpoint)
+        #expect(store.glyph(for: endpoint) == nil)
     }
 
-    @Test func pinSurvivesAddressChange() {
+    @Test func pinSurvivesAddressAndNameChangesWithTheSameMAC() {
         let store = store()
-        store.assign(.refrigerator, to: device("fridge", mac: "aa-aa-aa-aa-aa-aa"))
-        // Same MAC, different DHCP address and display name.
-        let renamed = ConnectedDevice(id: "x", name: "Kitchen-Fridge", ip: "192.168.8.99",
-                                      access: .wifi24G, mac: "AA:AA:AA:AA:AA:AA")
+        store.assign(.refrigerator, to: device("Example-Old", mac: "02-00-00-00-00-01", host: "old.example.invalid"))
+        let renamed = ConnectedDevice(id: "renamed", name: "Example-New", ip: "192.0.2.99",
+                                      access: .wifi24G, mac: "02:00:00:00:00:01", hostname: "new.example.invalid")
         #expect(store.glyph(for: renamed) == .refrigerator)
+    }
+
+    @Test func sharedHostnameDoesNotTransferAPinToAnotherMAC() {
+        let store = store()
+        let first = device("Example-First", mac: "02:00:00:00:00:01", host: "android")
+        let second = device("Example-Second", mac: "02:00:00:00:00:02", host: "ANDROID")
+        store.assign(.airPurifier, to: first)
+        #expect(store.glyph(for: second) == nil)
+    }
+
+    @Test func sharedDisplayNameDoesNotTransferAPinToAnotherMAC() {
+        let store = store()
+        store.assign(.washer, to: device("Example", mac: "02:00:00:00:00:01"))
+        #expect(store.glyph(for: device("Example", mac: "02:00:00:00:00:02")) == nil)
+    }
+
+    @Test func assigningAnotherMACDoesNotReplaceTheOriginalPin() {
+        let store = store()
+        let first = device("Example", mac: "02:00:00:00:00:01", host: "android")
+        let second = device("Example", mac: "02:00:00:00:00:02", host: "android")
+        store.assign(.washer, to: first)
+        store.assign(.camera, to: second)
+        #expect(store.all().count == 2)
+        #expect(store.glyph(for: first) == .washer)
+        #expect(store.glyph(for: second) == .camera)
+    }
+
+    @Test func clearingAnotherMACDoesNotRemoveTheOriginalPin() {
+        let store = store()
+        let first = device("Example", mac: "02:00:00:00:00:01", host: "android")
+        let second = device("Example", mac: "02:00:00:00:00:02", host: "android")
+        store.assign(.washer, to: first)
+        store.assign(nil, to: second)
+        #expect(store.glyph(for: first) == .washer)
+        #expect(store.all().count == 1)
+    }
+
+    @Test func missingMACDoesNotMatchAPinWithAKnownMAC() {
+        let store = store()
+        store.assign(.camera, to: device("Example", mac: "02:00:00:00:00:01", host: "android"))
+        #expect(store.glyph(for: device("Example", host: "android")) == nil)
+    }
+
+    @Test func fallbackIdentitiesWorkWhenNeitherSideHasAMAC() {
+        let store = store()
+        store.assign(.camera, to: device("Example-Old", host: "endpoint.example.invalid"))
+        #expect(store.glyph(for: device("Example-New", host: "ENDPOINT.example.invalid")) == .camera)
+        store.assign(.speaker, to: device("Example-Unnamed"))
+        #expect(store.glyph(for: device("Example-Unnamed")) == .speaker)
+        #expect(store.glyph(for: device("Example-New", mac: "02:00:00:00:00:01", host: "endpoint.example.invalid")) == nil)
+    }
+
+    @Test(arguments: ["", "android"])
+    func sameWeakNameAtAnotherIPDoesNotInheritAPin(_ host: String) {
+        let store = store()
+        let first = device("Example", host: host, ip: "192.0.2.10", id: "first")
+        let second = device("Example", host: host, ip: "192.0.2.11", id: "second")
+        store.assign(.washer, to: first)
+        #expect(store.glyph(for: second) == nil)
+    }
+
+    @Test(arguments: ["", "android"])
+    func assigningTheSameWeakNameAtAnotherIPPreservesBothPins(_ host: String) {
+        let store = store()
+        let first = device("Example", host: host, ip: "192.0.2.10", id: "first")
+        let second = device("Example", host: host, ip: "192.0.2.11", id: "second")
+        store.assign(.washer, to: first)
+        store.assign(.camera, to: second)
+        #expect(store.glyph(for: first) == .washer)
+        #expect(store.glyph(for: second) == .camera)
+        #expect(store.all().count == 2)
+    }
+
+    @Test(arguments: ["", "android"])
+    func clearingTheSameWeakNameAtAnotherIPPreservesTheOriginalPin(_ host: String) {
+        let store = store()
+        let first = device("Example", host: host, ip: "192.0.2.10", id: "first")
+        let second = device("Example", host: host, ip: "192.0.2.11", id: "second")
+        store.assign(.washer, to: first)
+        store.assign(nil, to: second)
+        #expect(store.glyph(for: first) == .washer)
+        #expect(store.all().count == 1)
+    }
+
+    @Test(arguments: ["", "android"])
+    func theSameWeakNameAtAnotherIPDoesNotKeepAStalePinAlive(_ host: String) {
+        let store = store()
+        let first = device("Example", host: host, ip: "192.0.2.10", id: "first")
+        let second = device("Example", host: host, ip: "192.0.2.11", id: "second")
+        store.assign(.washer, to: first, now: Date(timeIntervalSince1970: 0))
+        #expect(store.prune(keeping: [second], now: Date(timeIntervalSince1970: 10)) == 0)
+        #expect(store.all().values.first?.lastSeen == Date(timeIntervalSince1970: 0))
+        #expect(store.prune(keeping: [second], now: Date(timeIntervalSince1970: 31 * 24 * 3600)) == 1)
+        #expect(store.glyph(for: second) == nil)
+    }
+
+    @Test func weakIdentityDoesNotSurviveAnIPChangeEvenWhenTheIDIsUnchanged() {
+        let store = store()
+        store.assign(.washer, to: device("Example", host: "android", ip: "192.0.2.10", id: "same"))
+        #expect(store.glyph(for: device("Example", host: "android", ip: "192.0.2.11", id: "same")) == nil)
+    }
+
+    @Test func aWeakIdentityWithoutACurrentIPIsNotPersisted() {
+        let store = store()
+        let endpoint = device("Example", host: "android", ip: " ")
+        store.assign(.washer, to: endpoint)
+        #expect(store.glyph(for: endpoint) == nil)
+        #expect(store.all().isEmpty)
+    }
+
+    @Test func legacyWeakPinsWithoutAnIPDoNotMigrateAndExpireNormally() throws {
+        let defaults = UserDefaults(suiteName: "glyph-tests-\(UUID().uuidString)")!
+        let entries = [
+            "host:android": DeviceGlyphStore.Entry(glyph: .washer, lastSeen: Date(timeIntervalSince1970: 0), hostname: "android"),
+            "name:example": DeviceGlyphStore.Entry(glyph: .dryer, lastSeen: Date(timeIntervalSince1970: 0))
+        ]
+        defaults.set(try JSONEncoder().encode(entries), forKey: "deviceGlyphOverrides")
+        let store = DeviceGlyphStore(defaults: defaults)
+        let endpoint = device("Example", host: "android")
+        #expect(store.glyph(for: endpoint) == nil)
+        #expect(store.glyph(for: device("Example")) == nil)
+        #expect(store.prune(keeping: [endpoint], now: Date(timeIntervalSince1970: 10)) == 0)
+        #expect(store.all() == entries)
+        store.assign(.camera, to: endpoint, now: Date(timeIntervalSince1970: 20 * 24 * 3600))
+        #expect(store.all().count == 3)
+        #expect(store.prune(keeping: [endpoint], now: Date(timeIntervalSince1970: 31 * 24 * 3600)) == 2)
+        #expect(store.glyph(for: endpoint) == .camera)
     }
 
     @Test func staleEntryExpiresAfterAMonth() {
         let store = store()
-        let washer = device("washer", mac: "22-33-44-55-66-77")
-        store.assign(.washer, to: washer, now: Date(timeIntervalSince1970: 0))
-        // Seen again just under the window: kept.
-        let kept = store.prune(keeping: [], now: Date(timeIntervalSince1970: 29 * 24 * 3600))
-        #expect(kept == 0)
-        #expect(store.glyph(for: washer) == .washer)
-        // Past 30 days: dropped.
-        let removed = store.prune(keeping: [], now: Date(timeIntervalSince1970: 31 * 24 * 3600))
-        #expect(removed == 1)
-        #expect(store.glyph(for: washer) == nil)
+        let endpoint = device("Example", mac: "02:00:00:00:00:01")
+        store.assign(.washer, to: endpoint, now: Date(timeIntervalSince1970: 0))
+        #expect(store.prune(keeping: [], now: Date(timeIntervalSince1970: 29 * 24 * 3600)) == 0)
+        #expect(store.glyph(for: endpoint) == .washer)
+        #expect(store.prune(keeping: [], now: Date(timeIntervalSince1970: 31 * 24 * 3600)) == 1)
+        #expect(store.glyph(for: endpoint) == nil)
     }
 
     @Test func seenHostStaysPinned() {
         let store = store()
-        let deviceA = device("a", mac: "33-44-55-66-77-88")
-        store.assign(.dryer, to: deviceA, now: Date(timeIntervalSince1970: 0))
-        // Still on the LAN after 40 days: lastSeen refreshes, so it is not pruned.
-        let removed = store.prune(keeping: [deviceA], now: Date(timeIntervalSince1970: 40 * 24 * 3600))
-        #expect(removed == 0)
-        #expect(store.glyph(for: deviceA) == .dryer)
+        let endpoint = device("Example", mac: "02:00:00:00:00:01")
+        store.assign(.dryer, to: endpoint, now: Date(timeIntervalSince1970: 0))
+        #expect(store.prune(keeping: [endpoint], now: Date(timeIntervalSince1970: 40 * 24 * 3600)) == 0)
+        #expect(store.glyph(for: endpoint) == .dryer)
     }
 
-    /// A pin recorded by MAC is still found when the device returns with the same hostname
-    /// but a randomized MAC (and vice versa): the entry stores both aliases.
-    @Test func pinSurvivesEitherAliasChanging() {
+    @Test func differentMACWithTheSameHostnameDoesNotKeepAStalePinAlive() {
         let store = store()
-        store.assign(.airPurifier, to: device("esp-old", mac: "aa-bb-cc-dd-ee-ff", host: "purifier.local"))
-        // Same hostname, new MAC.
-        let newMAC = device("esp-new", mac: "11-22-33-44-55-66", host: "PURIFIER.local")
-        #expect(store.glyph(for: newMAC) == .airPurifier)
-        // Same MAC, new hostname.
-        let newHost = device("esp-new", mac: "AA:BB:CC:DD:EE:FF", host: "other.local")
-        #expect(store.glyph(for: newHost) == .airPurifier)
+        let first = device("Example", mac: "02:00:00:00:00:01", host: "android")
+        let second = device("Example", mac: "02:00:00:00:00:02", host: "android")
+        store.assign(.airPurifier, to: first, now: Date(timeIntervalSince1970: 0))
+        #expect(store.prune(keeping: [second], now: Date(timeIntervalSince1970: 10)) == 0)
+        #expect(store.all().values.first?.mac == "02:00:00:00:00:01")
+        #expect(store.prune(keeping: [second], now: Date(timeIntervalSince1970: 31 * 24 * 3600)) == 1)
+        #expect(store.glyph(for: second) == nil)
     }
 
-    /// Reassigning a pin must migrate it, not leave the old alias behind.
-    @Test func reassignmentDoesNotLeaveAStaleAlias() {
+    @Test func reassignmentDoesNotLeaveAStaleEntry() {
         let store = store()
-        let first = device("appliance", mac: "aa-bb-cc-dd-ee-ff", host: "appliance.local")
-        store.assign(.washer, to: first)
-        store.assign(.dryer, to: first)
+        let endpoint = device("Example", mac: "02:00:00:00:00:01", host: "endpoint.example.invalid")
+        store.assign(.washer, to: endpoint)
+        store.assign(.dryer, to: endpoint)
         #expect(store.all().count == 1)
-        let newMAC = device("appliance", mac: "11-22-33-44-55-66", host: "appliance.local")
-        #expect(store.glyph(for: newMAC) == .dryer)
-        store.assign(nil, to: newMAC)
+        #expect(store.glyph(for: endpoint) == .dryer)
+        store.assign(nil, to: endpoint)
         #expect(store.all().isEmpty)
     }
 
-    /// Pruning must refresh the aliases too, so a later MAC/hostname change still matches.
-    @Test func pruneRefreshesAliases() {
+    @Test func pruneRefreshesMetadataOnlyForTheSameMAC() {
         let store = store()
-        let first = device("purifier", mac: "aa-bb-cc-dd-ee-ff", host: "purifier.local")
+        let first = device("Example-Old", mac: "02:00:00:00:00:01", host: "old.example.invalid")
+        let renamed = device("Example-New", mac: "02-00-00-00-00-01", host: "new.example.invalid")
         store.assign(.airPurifier, to: first, now: Date(timeIntervalSince1970: 0))
-        let changed = device("purifier", mac: "11-22-33-44-55-66", host: "purifier.local")
-        #expect(store.prune(keeping: [changed], now: Date(timeIntervalSince1970: 10)) == 0)
-        let entry = store.all().values.first
-        #expect(entry?.mac == "11:22:33:44:55:66")
+        #expect(store.prune(keeping: [renamed], now: Date(timeIntervalSince1970: 10)) == 0)
+        #expect(store.all().values.first?.hostname == "new.example.invalid")
+        #expect(store.glyph(for: renamed) == .airPurifier)
+    }
+
+    @Test func legacyMACKeyStillPreventsHostnameAliasesFromCrossingMACs() {
+        let store = store()
+        let entries = ["mac:02:00:00:00:00:01": DeviceGlyphStore.Entry(
+            glyph: .washer, lastSeen: Date(), hostname: "android")]
+        #expect(store.glyph(for: device("Example", mac: "02:00:00:00:00:01"), in: entries) == .washer)
+        #expect(store.glyph(for: device("Example", mac: "02:00:00:00:00:02", host: "android"), in: entries) == nil)
+    }
+
+    @Test func originalMACKeyWinsOverMetadataChangedByLegacyHostnameMatching() {
+        let store = store()
+        let entries = ["mac:02:00:00:00:00:01": DeviceGlyphStore.Entry(
+            glyph: .washer, lastSeen: Date(), mac: "02:00:00:00:00:02", hostname: "android")]
+        #expect(store.glyph(for: device("Example", mac: "02:00:00:00:00:01"), in: entries) == .washer)
+        #expect(store.glyph(for: device("Example", mac: "02:00:00:00:00:02", host: "android"), in: entries) == nil)
+    }
+
+    @Test func assigningAFallbackIdentityPreservesALegacyPinWithKnownMAC() throws {
+        let defaults = UserDefaults(suiteName: "glyph-tests-\(UUID().uuidString)")!
+        let entries = ["host:android": DeviceGlyphStore.Entry(
+            glyph: .washer, lastSeen: Date(), mac: "02:00:00:00:00:01", hostname: "android")]
+        defaults.set(try JSONEncoder().encode(entries), forKey: "deviceGlyphOverrides")
+        let store = DeviceGlyphStore(defaults: defaults)
+        let fallback = device("Example", host: "android")
+        store.assign(.camera, to: fallback)
+        #expect(store.glyph(for: fallback) == .camera)
+        #expect(store.glyph(for: device("Example", mac: "02:00:00:00:00:01")) == .washer)
+        #expect(store.all().count == 2)
     }
 
     @Test func everyGlyphHasATitleAndSymbol() {

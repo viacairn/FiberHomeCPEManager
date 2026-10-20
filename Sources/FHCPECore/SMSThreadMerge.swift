@@ -1,6 +1,6 @@
 import Foundation
 
-/// Reconciles a device-provided conversation list with optimistic sent bubbles.
+/// Reconciles device conversations with optimistic sent bubbles and local read status.
 ///
 /// The firmware's get_sms_data call can lag a just-sent message by a moment. The UI appends
 /// the bubble immediately with an id prefixed local-sent-; this merge keeps that bubble
@@ -12,19 +12,40 @@ public enum SMSThreadMerge {
         var result = threads
         for localThread in local {
             let pending = localThread.messages.filter { $0.id.hasPrefix("local-sent-") }
-            guard !pending.isEmpty else { continue }
             if let index = result.firstIndex(where: { $0.phone == localThread.phone }) {
+                // An earlier get_sms_data reply can arrive after the user opens a thread.
+                // Keep those exact received messages read; a newly received message (or a
+                // reused firmware node with different contents/time) still starts unread.
+                let read = localThread.messages.filter { $0.isRead && !$0.isSent }
+                result[index] = settingRead(true, for: read, in: result[index])
                 for message in pending where !result[index].messages.contains(where: {
                     $0.isSent && $0.body == message.body && isConfirmed(localDate: message.date, deviceDate: $0.date)
                 }) {
                     result[index].messages.append(message)
                 }
                 result[index].messages.sort { $0.date < $1.date }
-            } else {
+            } else if !pending.isEmpty {
                 result.append(localThread)
             }
         }
         result.sort { ($0.lastMessage?.date ?? "") > ($1.lastMessage?.date ?? "") }
+        return result
+    }
+
+    /// Updates only the received messages included in one mark-read write. The same
+    /// identity check also makes a late failure safe if a firmware node was reused.
+    public static func settingRead(_ isRead: Bool, for messages: [SMSMessage], in thread: SMSThread) -> SMSThread {
+        var result = thread
+        for index in result.messages.indices where !result.messages[index].isSent {
+            let candidate = result.messages[index]
+            if messages.contains(where: {
+                !$0.isSent && $0.id == candidate.id && $0.sender == candidate.sender
+                    && $0.childnode == candidate.childnode && $0.date == candidate.date
+                    && $0.body == candidate.body
+            }) {
+                result.messages[index].isRead = isRead
+            }
+        }
         return result
     }
 
@@ -42,10 +63,25 @@ public enum SMSThreadMerge {
         return deviceTime.timeIntervalSince(localTime) >= -60
     }
 
+    private static let posixCalendar: Calendar = {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0) ?? .current
+        return calendar
+    }()
+
     private static func parseDate(_ text: String) -> Date? {
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.dateFormat = "yyyy/MM/dd HH:mm:ss"
-        return formatter.date(from: text)
+        let parts = text.split(whereSeparator: { $0 == "/" || $0 == " " || $0 == ":" })
+        guard parts.count == 6,
+              let year = Int(parts[0]),
+              let month = Int(parts[1]),
+              let day = Int(parts[2]),
+              let hour = Int(parts[3]),
+              let minute = Int(parts[4]),
+              let second = Int(parts[5])
+        else { return nil }
+        return posixCalendar.date(from: DateComponents(
+            year: year, month: month, day: day,
+            hour: hour, minute: minute, second: second
+        ))
     }
 }

@@ -68,11 +68,6 @@ public struct PortMappingPage: View {
                        actionLabel: "添加端口映射", onAction: presentAdd, onBack: leavePage)
             if isLive {
                 onlineContent
-                if let status {
-                    StatusBanner(text: status, tone: statusIsError ? .error : .success)
-                        .padding(.horizontal, Theme.contentPadding)
-                        .padding(.bottom, 8)
-                }
             } else {
                 AdvancedSettingsDisconnectedState()
             }
@@ -111,6 +106,7 @@ public struct PortMappingPage: View {
             deletingID = nil
         }
         .onDisappear { invalidatePage() }
+        .appReminder(rowError)
     }
 
     private var editorPresentation: Binding<Bool> {
@@ -142,7 +138,6 @@ public struct PortMappingPage: View {
                         }
                     }
                 }
-                if let rowError { StatusBanner(text: rowError, tone: .error) }
             }
             .padding(.horizontal, Theme.contentPadding)
             .padding(.top, 8)
@@ -360,7 +355,6 @@ private struct PortMappingForm: View {
                     .toggleStyle(.checkbox)
                     .font(.system(size: 11))
                     .disabled(locked)
-                if let error { StatusBanner(text: error, tone: .error) }
                 HStack(spacing: 8) {
                     Button("取消", action: onCancel)
                         .buttonStyle(.plain)
@@ -384,6 +378,8 @@ private struct PortMappingForm: View {
         .frame(width: Theme.compactWidth - 32)
         .frame(maxHeight: Theme.canvasHeight)
         .interactiveDismissDisabled(saving)
+        .appReminder(error)
+        .appNoticeOverlay(top: 36)
     }
 
     @ViewBuilder private func field<Content: View>(_ label: String,

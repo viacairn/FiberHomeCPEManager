@@ -35,9 +35,10 @@ public struct SubpageBar: View {
     public var body: some View {
         ZStack {
             Text(title)
-                .font(.system(size: 12.5, weight: .bold))
+                .font(.system(size: 12, weight: .bold))
                 .foregroundStyle(.primary)
                 .lineLimit(1)
+                .padding(.horizontal, 72)
 
             HStack(spacing: 0) {
                 Button(action: onBack) {
@@ -99,7 +100,8 @@ public struct BottomGlassTabBar: View {
     public let deviceCount: Int?
     public let unread: Int?
 
-    @Namespace private var namespace
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    @Environment(\.fhcpemGlassEnabled) private var glassEnabled
 
     public init(items: [Item], selection: Binding<Int>, deviceCount: Int?, unread: Int?) {
         self.items = items; self._selection = selection
@@ -114,6 +116,7 @@ public struct BottomGlassTabBar: View {
         }
         .padding(4)
         .background { container }
+        .contentShape(CapsulePanelShape(maxRadius: 999))
         // Horizontal insets live in the bar; the shell owns the gap above and the inset
         // below, so the bar is exactly tabBarHeight tall (44 pt content + 4 pt padding).
         .padding(.horizontal, Theme.contentPadding)
@@ -124,7 +127,7 @@ public struct BottomGlassTabBar: View {
     private func tab(_ item: Item) -> some View {
         let selected = item.id == selection
         return Button {
-            withAnimation(.snappy(duration: 0.2)) { selection = item.id }
+            selection = item.id
         } label: {
             VStack(spacing: 2) {
                 ZStack(alignment: .topTrailing) {
@@ -157,7 +160,6 @@ public struct BottomGlassTabBar: View {
                             CapsulePanelShape(maxRadius: 999)
                                 .strokeBorder(Color.accentColor.opacity(0.32), lineWidth: 0.6)
                         )
-                        .matchedGeometryEffect(id: "bottom-tab-pill", in: namespace)
                 }
             }
             .contentShape(CapsulePanelShape(maxRadius: 999))
@@ -178,11 +180,17 @@ public struct BottomGlassTabBar: View {
 
     @ViewBuilder private var container: some View {
         let pill = CapsulePanelShape(maxRadius: 999)
-        pill
-            .fill(Theme.panelFill)
-            .overlay(pill.inset(by: 0.5).strokeBorder(Theme.panelHighlight, lineWidth: 0.8))
-            .overlay(pill.strokeBorder(Theme.hairlineStrong, lineWidth: 0.75))
-            .shadow(color: Theme.panelShadow, radius: 6, x: 0, y: 2)
+        Group {
+            if #available(macOS 26.0, *), glassEnabled, !reduceTransparency {
+                pill.fill(.clear).glassEffect(.regular, in: pill)
+            } else {
+                pill.fill(Theme.panelFill)
+                    .overlay(pill.inset(by: 0.5).strokeBorder(Theme.panelHighlight, lineWidth: 0.8))
+                    .overlay(pill.strokeBorder(Theme.hairlineStrong, lineWidth: 0.75))
+            }
+        }
+        .shadow(color: Theme.panelShadow, radius: 6, x: 0, y: 2)
+        .allowsHitTesting(false)
     }
 }
 

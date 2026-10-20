@@ -79,6 +79,10 @@ final class FakeCPE: @unchecked Sendable {
     /// Mirrors the RP0112 heartbeat's expired-session status after another entry logs in.
     private var sessionExpired = false
     func expireSession() { queue.sync { sessionExpired = true } }
+    private var supportsHeartbeat = true
+    func disableHeartbeat() { queue.sync { supportsHeartbeat = false } }
+    private var supportsActivityRenewal = true
+    func disableActivityRenewal() { queue.sync { supportsActivityRenewal = false } }
 
     // MARK: HTTP
 
@@ -131,6 +135,19 @@ final class FakeCPE: @unchecked Sendable {
         let url = URL(string: "http://x\(request.path)")!
         let query = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
         let ajaxmethod = query.first { $0.name == "ajaxmethod" }?.value
+
+        if request.path == "/fh_api/tmp/heartbeat" {
+            trace("HEARTBEAT")
+            guard supportsHeartbeat else { return http(404, Data()) }
+            return loginAccepted && !sessionExpired
+                ? http(200, Data("1\n".utf8)) : http(418, Data("0\n".utf8))
+        }
+
+        if request.path == "/fh_api/tmp/refresh_timeout" {
+            trace("REFRESH_TIMEOUT")
+            guard supportsActivityRenewal else { return http(404, Data()) }
+            return loginAccepted && !sessionExpired ? http(200, Data()) : http(418, Data("0\n".utf8))
+        }
 
         if request.path.hasPrefix("/fh_api/tmp/FHNCAPIS"), request.method == "GET" {
             switch ajaxmethod {

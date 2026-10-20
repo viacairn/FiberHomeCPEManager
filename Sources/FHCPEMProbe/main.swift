@@ -25,6 +25,10 @@ struct Probe {
             await auditSessions(address: address, username: user, password: password)
             return
         }
+        if CommandLine.arguments.contains("--dhcp-write-audit") {
+            let ok = await auditDHCP(address: address, username: user, password: password)
+            exit(ok ? 0 : 1)
+        }
         let session = DeviceSession(address: address)
         do {
             _ = try await session.connect(username: user, password: password)
@@ -35,10 +39,27 @@ struct Probe {
 
         let arguments = Array(CommandLine.arguments.dropFirst())
 
-        if arguments.first == "--network-audit" {
-            await auditNetwork(session)
+        if arguments.first == "--keepalive-audit" {
+            let seconds = arguments.dropFirst().first.flatMap(Double.init) ?? 360
+            guard seconds.isFinite, seconds > 0 else {
+                print("audit duration must be a positive number of seconds")
+                await session.close()
+                exit(1)
+            }
+            let ok = await auditKeepAlive(session, seconds: seconds)
             await session.close()
-            exit(0)
+            exit(ok ? 0 : 1)
+        }
+
+        if arguments.first == "--network-audit" {
+            let ok = await auditNetwork(session)
+            await session.close()
+            exit(ok ? 0 : 1)
+        }
+        if arguments.first == "--fan-audit" {
+            let ok = await auditFan(session)
+            await session.close()
+            exit(ok ? 0 : 1)
         }
         if arguments.first == "--port-add-test" {
             await portAddTest(session)
@@ -131,6 +152,41 @@ struct Probe {
         await session.close()
     }
 
+    /// Exercises the production session without UI activity or automatic re-login.
+    /// Output contains only elapsed time and counts, never device readings or identity.
+    static func auditKeepAlive(_ session: DeviceSession, seconds: Double) async -> Bool {
+        let clock = ContinuousClock()
+        let started = clock.now
+        let deadline = started.advanced(by: .seconds(seconds))
+        let startedUptime = ProcessInfo.processInfo.systemUptime
+        var sampledAt = started
+        var count = 1 // connect already obtained the first protected sample
+        var lastReport = 0
+        func report(_ text: String) {
+            FileHandle.standardOutput.write(Data((text + "\n").utf8))
+        }
+        report("idle session audit: duration=\(Int(seconds))s, refresh=\(Int(SessionRefreshPolicy.dataInterval))s")
+        do {
+            while clock.now < deadline {
+                try await clock.sleep(until: min(sampledAt.advanced(by: .seconds(SessionRefreshPolicy.dataInterval)), deadline))
+                sampledAt = clock.now
+                _ = try await session.refresh()
+                count += 1
+                let elapsed = Int(ProcessInfo.processInfo.systemUptime - startedUptime)
+                if elapsed - lastReport >= 30 {
+                    report("elapsed=\(elapsed)s, protected samples=\(count), authenticated")
+                    lastReport = elapsed
+                }
+            }
+            report("PASS: idle for \(Int(ProcessInfo.processInfo.systemUptime - startedUptime))s; \(count) protected samples; no re-login")
+            return true
+        } catch {
+            let elapsed = Int(ProcessInfo.processInfo.systemUptime - startedUptime)
+            report("FAIL: elapsed=\(elapsed)s; \(error.localizedDescription)")
+            return false
+        }
+    }
+
     /// Explicit development diagnostic. Uses two independent in-memory cookie jars,
     /// reads only, and prints no credentials, cookies, tokens, or message contents.
     static func auditSessions(address: DeviceAddress, username: String, password: String) async {
@@ -158,8 +214,88 @@ struct Probe {
         await first.close(); await second.close()
     }
 
+    /// Uses an unused locally administered MAC and two unoccupied pool addresses. No
+    /// actual client's binding is edited. Cleanup also runs after an uncertain write.
+    static func auditDHCP(address: DeviceAddress, username: String, password: String) async -> Bool {
+        let transport = LocalTransport(address: address)
+        let adapter = LG6851Adapter(rpc: transport)
+        let service = DHCPReservationService(rpc: transport)
+        var baseline: [DHCPReservation]?
+        var ownedMAC: String?
+        var testIPs = Set<String>()
+        var ok = true
+        do {
+            try await adapter.login(username: username, password: password)
+            let original = try await service.read()
+            baseline = original
+            let clients = try await adapter.devices()
+            let config = try await adapter.read([
+                "min": DHCPReservationService.lanRoot + "MinAddress",
+                "max": DHCPReservationService.lanRoot + "MaxAddress",
+                "router": DHCPReservationService.lanRoot + "IPInterface.1.IPInterfaceIPAddress"
+            ])
+            func number(_ text: String?) -> UInt32? {
+                guard let text else { return nil }
+                let parts = text.split(separator: ".")
+                guard parts.count == 4 else { return nil }
+                var value: UInt32 = 0
+                for part in parts {
+                    guard let octet = UInt8(part) else { return nil }
+                    value = (value << 8) | UInt32(octet)
+                }
+                return value
+            }
+            func addressText(_ value: UInt32) -> String {
+                [24, 16, 8, 0].map { String((value >> $0) & 255) }.joined(separator: ".")
+            }
+            guard let min = number(config["min"].text), let max = number(config["max"].text),
+                  min < max, max - min < 65_536 else { throw CPEError.malformedResponse }
+            let occupied = Set(original.map(\.ip) + clients.map(\.ip) + [config["router"].text ?? ""])
+            var free: [String] = []
+            for candidate in stride(from: Int(max), through: Int(min), by: -1) {
+                let ip = addressText(UInt32(candidate))
+                if !occupied.contains(ip) { free.append(ip) }
+                if free.count == 2 { break }
+            }
+            guard free.count == 2 else { throw CPEError.unsupported("DHCP 地址池没有两个空闲测试地址") }
+            let bytes = Array(UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(8))
+            let tail = stride(from: 0, to: bytes.count, by: 2).map { String(bytes[$0...($0 + 1)]) }
+            let mac = (["02", "CF"] + tail).joined(separator: ":").uppercased()
+            guard !Set(original.map(\.mac) + clients.compactMap(\.mac).map { $0.uppercased() }).contains(mac) else {
+                throw CPEError.uncertain
+            }
+            ownedMAC = mac; testIPs = Set(free)
+            print("DHCP table read: confirmed")
+            _ = try await service.reserve(mac: mac, ip: free[0])
+            print("DHCP create and independent read-back: confirmed")
+            _ = try await service.reserve(mac: mac, ip: free[1])
+            print("DHCP edit and independent read-back: confirmed")
+        } catch {
+            ok = false
+            print("DHCP audit: \(error.localizedDescription)")
+        }
+        if let ownedMAC {
+            do {
+                if let current = try await service.read().first(where: { $0.mac == ownedMAC }) {
+                    guard testIPs.contains(current.ip) else { throw CPEError.uncertain }
+                    try await service.remove(current)
+                }
+                let remaining = try await service.read()
+                let before = Set((baseline ?? []).map { "\($0.mac)|\($0.ip)" })
+                let after = Set(remaining.map { "\($0.mac)|\($0.ip)" })
+                guard before == after else { throw CPEError.uncertain }
+                print("DHCP cleanup and original table: confirmed")
+            } catch {
+                ok = false
+                print("DHCP cleanup needs attention for test MAC \(ownedMAC): \(error.localizedDescription)")
+            }
+        }
+        await transport.close()
+        return ok
+    }
+
     /// Read-only snapshot of the nodes added for the mobile/DDNS/port-mapping pages.
-    static func auditNetwork(_ session: DeviceSession) async {
+    static func auditNetwork(_ session: DeviceSession) async -> Bool {
         do {
             let mobile = try await session.readMobileNetwork()
             print("mobile: airplane=\(mobile.airplaneMode) data=\(mobile.cellularDataEnabled) "
@@ -167,18 +303,45 @@ struct Probe {
                 + "wan=\(mobile.cellularWAN?.title ?? "-")")
             let ddns = try await session.readDDNS()
             print("ddns: \(ddns.count)")
-            for entry in ddns {
-                print("  \(entry.providerTitle) \(entry.hostname) enabled=\(entry.enabled) wan=\(entry.wan.title)")
-            }
             let ports = try await session.readPortMappings()
             print("port mappings: \(ports.count)")
-            for entry in ports {
-                print("  \(entry.wan.title) \(entry.localIP) \(entry.internalRange)->\(entry.externalRange) "
-                    + "\(entry.proto.title) enabled=\(entry.enabled)")
-            }
+            return true
         } catch {
             print("network audit failed: \(error)")
+            return false
         }
+    }
+
+    /// Explicit device write check; every successful save includes a protected read-back.
+    /// Restore the confirmed initial mode even when an intermediate verification fails.
+    static func auditFan(_ session: DeviceSession) async -> Bool {
+        let initial: FanMode
+        do {
+            guard let mode = try await session.readSettings().fan else {
+                print("unknown initial fan mode; no write sent"); return false
+            }
+            initial = mode
+        } catch {
+            print("fan precheck failed; no write sent: \(error.localizedDescription)"); return false
+        }
+        var success = true
+        do {
+            for mode in FanMode.allCases {
+                guard try await session.setFanMode(mode) else { throw CPEError.uncertain }
+                print("fan mode \(mode.rawValue): confirmed")
+            }
+        } catch {
+            success = false
+            print("fan audit failed: \(error.localizedDescription)")
+        }
+        do {
+            guard try await session.setFanMode(initial) else { throw CPEError.uncertain }
+            print("fan restored to initial mode \(initial.rawValue)")
+        } catch {
+            print("fan restoration FAILED: \(error.localizedDescription)")
+            return false
+        }
+        return success
     }
 
     /// Adds one disabled mapping, reads it back, then deletes it. Used only by explicit

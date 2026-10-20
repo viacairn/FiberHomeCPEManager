@@ -5,6 +5,7 @@ import FHCPECore
 /// The popover shell. It owns nothing about networking: a `ShellModel` supplies state and
 /// callbacks so the layout can be rendered (and screenshot-tested) without a session.
 public struct ShellView: View {
+    private static var canvasSpace: String { "fhcpem.shellCanvas" }
     public enum Route: Equatable, Sendable {
         case connect, main, cellular, about, ddns, portMapping
     }
@@ -22,7 +23,26 @@ public struct ShellView: View {
                 content
             }
         }
+        // The hosting controller isolates the native arrow safe area from this fixed
+        // page canvas. Only the backdrop extends into the surrounding native margin.
         .frame(width: Theme.compactWidth, height: Theme.compactHeight)
+        .coordinateSpace(name: Self.canvasSpace)
+        .overlay(alignment: .top) {
+            AppNoticeStack(center: model.notices)
+                .padding(.horizontal, Theme.contentPadding)
+                .padding(.top, model.route == .about ? Theme.topInset
+                         : Theme.topInset + Theme.globalTitleHeight + Theme.globalTitleGap)
+        }
+        .onChange(of: model.data.isLive) { wasLive, live in
+            if wasLive && !live, model.statusMessage == nil, model.connectError == nil {
+                model.notices.show("连接已断开，请重新连接设备", tone: .error)
+            }
+        }
+        .animation(nil, value: model.tab)
+        .animation(nil, value: model.route)
+        .animation(nil, value: model.smsRoute)
+        .scrollBounceBehavior(.basedOnSize, axes: [.vertical, .horizontal])
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(
             ZStack {
                 VisualEffectBackground()
@@ -30,23 +50,15 @@ public struct ShellView: View {
             }
             .ignoresSafeArea()
         )
+        .environment(\.appNotices, model.notices)
     }
 
     private var content: some View {
         VStack(spacing: 0) {
-            if model.route != .about {
-                Text("FiberHome CPE Manager")
-                    .font(.system(size: 18, weight: .semibold))
-                    .foregroundStyle(.primary)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.9)
-                    .multilineTextAlignment(.center)
-                    .frame(maxWidth: .infinity, alignment: .center)
-                    .padding(.horizontal, Theme.contentPadding)
-                    .frame(height: Theme.globalTitleHeight, alignment: .top)
-                    .accessibilityAddTraits(.isHeader)
-            }
             if model.route == .connect {
+                globalTitle
+                    .padding(.top, Theme.topInset)
+                    .padding(.bottom, Theme.globalTitleGap)
                 ConnectPage(address: $model.draftAddress, username: $model.draftUsername,
                             password: $model.draftPassword,
                             savePassword: $model.savePassword,
@@ -55,21 +67,9 @@ public struct ShellView: View {
                             onDetectGateway: model.detectGateway)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                // Every number here is a fixed part of the 590 pt panel. The old layout
-                // stacked a fixed 526 pt canvas, a 6 pt pad and a 68 pt bar (612 pt) inside
-                // 590 pt, so SwiftUI clipped the bar's own bottom padding and the capsule
-                // sat flush against the panel edge. The canvas now *derives* its height from
-                // the chrome, so all four margins are exactly 16 pt.
-                canvas
-                    .frame(height: Theme.canvasHeight - (model.route == .about ? 0 : Theme.globalTitleHeight))
-                BottomGlassTabBar(items: Self.tabItems, selection: tabSelection,
-                                  deviceCount: model.data.isLive ? model.data.devices.count : nil,
-                                  unread: model.data.isLive ? model.threads.reduce(0) { $0 + $1.unreadCount } : 0)
-                    .padding(.top, Theme.tabBarGap)
-                    .padding(.bottom, Theme.tabBarBottomInset)
+                navigatedCanvas
             }
         }
-        .padding(.top, Theme.topInset)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .onChange(of: model.tab) { _, tab in
             // Entering 控制 re-reads the device settings once. The 1 Hz refresh loop no
@@ -77,6 +77,84 @@ public struct ShellView: View {
             if tab == 2, model.route == .main { model.onControlsSelected() }
             if tab == 3, model.route == .main { model.onSMSSelected() }
         }
+    }
+
+    @ViewBuilder private var navigatedCanvas: some View {
+        if #available(macOS 26.0, *) {
+            titledCanvas
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .safeAreaBar(edge: .bottom, spacing: Theme.tabBarGap) { navigationBar }
+                .scrollEdgeEffectStyle(.soft, for: [.top, .bottom])
+        } else {
+            titledCanvas
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .safeAreaInset(edge: .bottom, spacing: Theme.tabBarGap) { navigationBar }
+        }
+    }
+
+    @ViewBuilder private var titledCanvas: some View {
+        if model.route == .about {
+            canvas.padding(.top, Theme.topInset)
+        } else if #available(macOS 26.0, *) {
+            protectedCanvas.safeAreaBar(edge: .top, spacing: Theme.globalTitleGap) {
+                titleBar
+            }
+        } else {
+            protectedCanvas.safeAreaInset(edge: .top, spacing: Theme.globalTitleGap) {
+                titleBar
+            }
+        }
+    }
+
+    /// Fade moving content out beneath the title without tinting the shared backdrop.
+    /// A page already placed below the title receives an entirely opaque mask.
+    private var protectedCanvas: some View {
+        canvas.mask {
+            GeometryReader { geometry in
+                let origin = geometry.frame(in: .named(Self.canvasSpace)).minY
+                let titleEnd = Theme.topInset + Theme.globalTitleHeight
+                let clearEnd = max(0, titleEnd - origin)
+                let fadeEnd = max(0, titleEnd + Theme.globalTitleGap - origin)
+                let height = max(1, geometry.size.height)
+                if fadeEnd > 0 {
+                    LinearGradient(colors: [.clear, .black],
+                                   startPoint: UnitPoint(x: 0.5, y: clearEnd / height),
+                                   endPoint: UnitPoint(x: 0.5, y: fadeEnd / height))
+                } else { Color.black }
+            }
+        }
+    }
+
+    private var titleBar: some View {
+        // The content mask protects this region even when NSPopover does not draw
+        // the system scroll-edge effect. The title uses the shared shell backdrop.
+        globalTitle.padding(.top, Theme.topInset)
+            .background {
+                // Concealed controls must not receive clicks through the title band.
+                Color.clear.contentShape(Rectangle())
+                    .onTapGesture { }
+                    .accessibilityHidden(true)
+            }
+    }
+
+    private var globalTitle: some View {
+        Text("FiberHome CPE Manager")
+            .font(.system(size: 12.5, weight: .semibold))
+            .foregroundStyle(.primary)
+            .lineLimit(1)
+            .minimumScaleFactor(0.9)
+            .multilineTextAlignment(.center)
+            .frame(maxWidth: .infinity, alignment: .center)
+            .padding(.horizontal, Theme.contentPadding)
+            .frame(height: Theme.globalTitleHeight, alignment: .center)
+            .accessibilityAddTraits(.isHeader)
+    }
+
+    private var navigationBar: some View {
+        BottomGlassTabBar(items: Self.tabItems, selection: tabSelection,
+                          deviceCount: model.data.isLive ? model.data.devices.count : nil,
+                          unread: model.data.isLive ? model.threads.reduce(0) { $0 + $1.unreadCount } : 0)
+            .padding(.bottom, Theme.tabBarBottomInset)
     }
 
     /// Switching tabs must leave any drill-in page, so the header never shows a stale title.
@@ -130,13 +208,6 @@ public struct ShellView: View {
                                    onUpdateLockedCell: model.updateLockedCell,
                                    onDeleteLockedCell: model.deleteLockedCell,
                                    onDisableLocks: model.disableLocks)
-                    .overlay(alignment: .bottom) {
-                        if let status = model.lockStatus {
-                            StatusBanner(text: status, tone: model.lockStatusIsError ? .error : .success)
-                                .padding(.horizontal, Theme.contentPadding)
-                                .padding(.bottom, 6)
-                        }
-                    }
             case .main:
                 switch model.tab {
                 case 1:
@@ -212,6 +283,7 @@ public struct ShellView: View {
 /// Observable view model for the shell. The concrete app subclasses/feeds this with a
 /// live `DeviceSession`; the renderer feeds it fixtures.
 @MainActor @Observable public final class ShellModel {
+    public let notices = AppNoticeCenter()
     public var route: ShellView.Route
     public var tab: Int
     public var data: PageData {
@@ -222,8 +294,12 @@ public struct ShellView: View {
     public var lockMode: LockMode
     public var lockBusy = false
     public var radioLocks: RadioLockState?
-    public var lockStatus: String?
-    public var lockStatusIsError = false
+    public var lockStatus: String? {
+        didSet { if lockStatus != oldValue { notices.enqueueStatus(lockStatus, source: "lock", tone: lockStatusIsError ? .error : .success) } }
+    }
+    public var lockStatusIsError = false {
+        didSet { notices.updateStatusTone(source: "lock", tone: lockStatusIsError ? .error : .success) }
+    }
     /// Which segment the cellular page opens on (renderer/test seam).
     public var cellularTab = 0
     public var busy = false
@@ -235,8 +311,12 @@ public struct ShellView: View {
     public var ddnsLoaded = false
     public var portMappingsLoaded = false
     public var advancedBusy = false
-    public var advancedStatus: String?
-    public var advancedStatusIsError = false
+    public var advancedStatus: String? {
+        didSet { if advancedStatus != oldValue { notices.enqueueStatus(advancedStatus, source: "advanced", tone: advancedStatusIsError ? .error : .success) } }
+    }
+    public var advancedStatusIsError = false {
+        didSet { notices.updateStatusTone(source: "advanced", tone: advancedStatusIsError ? .error : .success) }
+    }
 
     public var draftAddress: String
     public var draftUsername: String
@@ -245,9 +325,18 @@ public struct ShellView: View {
     public var menuBarStyle: MenuBarStyle = .default
     /// Bare host of the connected device.
     public var lanAddress: String = ""
-    public var connectError: String?
-    /// Transient feedback shown under the connection form (keychain, cell actions).
-    public var statusMessage: String?
+    public var connectError: String? {
+        didSet { if connectError != oldValue { notices.enqueueStatus(connectError, source: "connect", tone: .error) } }
+    }
+    /// Transient feedback delivered by the shell's notification bubbles.
+    public var statusMessage: String? {
+        didSet {
+            if statusMessage != oldValue {
+                let error = statusMessage.map { $0.hasPrefix("未能") || $0.hasPrefix("无法") || $0.hasPrefix("连接已断开") } == true
+                notices.enqueueStatus(statusMessage, source: "status", tone: error ? .error : .info)
+            }
+        }
+    }
 
     public var searchQuery = ""
     public var accessFilter: DevicesPage.AccessFilter = .all
@@ -259,15 +348,28 @@ public struct ShellView: View {
     /// Settings hub state.
     public var settings: DeviceSettings?
     public var settingsBusy = false
-    public var settingsStatus: String?
-    public var settingsStatusIsError = false
+    public var settingsStatus: String? {
+        didSet { if settingsStatus != oldValue { notices.enqueueStatus(settingsStatus, source: "settings", tone: settingsNoticeTone) } }
+    }
+    public var settingsStatusIsError = false {
+        didSet { notices.updateStatusTone(source: "settings", tone: settingsNoticeTone) }
+    }
+    private var settingsNoticeTone: AppNoticeTone {
+        if settingsStatusIsError { return .error }
+        if settingsStatus?.hasPrefix("正在") == true || settingsStatus?.hasPrefix("切换中") == true { return .info }
+        return .success
+    }
     /// The mode being switched to, shown as a spinner on its card.
     public var uplinkSwitchTarget: UplinkTarget?
     public var switchUplink: (UplinkTarget) -> Void = { _ in }
     public var draftNumber = ""
     public var draftBody = ""
-    public var smsStatus: String?
-    public var smsStatusIsError = false
+    public var smsStatus: String? {
+        didSet { if smsStatus != oldValue { notices.enqueueStatus(smsStatus, source: "sms", tone: smsStatusIsError ? .error : .success) } }
+    }
+    public var smsStatusIsError = false {
+        didSet { notices.updateStatusTone(source: "sms", tone: smsStatusIsError ? .error : .success) }
+    }
     /// Last successful get_sms_data read; shown as a subtle sync stamp on the SMS list.
     public var smsLastSync: Date?
 

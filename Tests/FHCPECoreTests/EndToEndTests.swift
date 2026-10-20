@@ -6,10 +6,67 @@ import Foundation
 ///
 /// These never touch the real router and never read a Keychain item: the fake server only
 /// accepts the literal test password. Its responses reproduce the quirks observed on the
-/// live RP0112 unit (see docs/protocol/LIVE-VERIFIED-2026-10-17.md), so a regression in
+/// live RP0112 unit (see docs/protocol/WEB-API.md), so a regression in
 /// parsing shows up here instead of on the user's network.
 @Suite(.serialized)
 struct EndToEndTests {
+    @Test func unavailableHeartbeatDoesNotBlockProtectedSampling() async throws {
+        try await withServer { server, port in
+            server.disableHeartbeat()
+            let session = DeviceSession(address: try DeviceAddress("http://127.0.0.1:\(port)"))
+            let connected = try await session.connect(username: "admin", password: "test-password")
+            #expect(connected.snapshot.model == "LG6851F")
+            _ = try await session.refresh()
+            #expect(server.log.filter { $0 == "HEARTBEAT" }.count == 1)
+            server.expireSession()
+            await #expect(throws: CPEError.authentication) { _ = try await session.refresh() }
+            await session.close()
+        }
+    }
+
+    @Test func heartbeatUsesCurrentLoginAndRejectsExpiredSession() async throws {
+        try await withServer { server, port in
+            let transport = LocalTransport(address: try DeviceAddress("http://127.0.0.1:\(port)"))
+            await #expect(throws: CPEError.authentication) { try await transport.keepAlive() }
+            #expect(!server.log.contains("REFRESH_TIMEOUT"))
+            try await LG6851Adapter(rpc: transport).login(username: "admin", password: "test-password")
+            try await transport.keepAlive()
+            #expect(Array(server.log.suffix(2)) == ["HEARTBEAT", "REFRESH_TIMEOUT"])
+            server.expireSession()
+            await #expect(throws: CPEError.authentication) { try await transport.keepAlive() }
+            #expect(server.log.filter { $0 == "REFRESH_TIMEOUT" }.count == 1)
+            await transport.close()
+        }
+    }
+
+    @Test func firmwareWithoutActivityEndpointKeepsCheckingAuthentication() async throws {
+        try await withServer { server, port in
+            server.disableActivityRenewal()
+            let transport = LocalTransport(address: try DeviceAddress("http://127.0.0.1:\(port)"))
+            try await LG6851Adapter(rpc: transport).login(username: "admin", password: "test-password")
+            try await transport.keepAlive()
+            try await transport.keepAlive()
+            #expect(server.log.filter { $0 == "HEARTBEAT" }.count == 2)
+            #expect(server.log.filter { $0 == "REFRESH_TIMEOUT" }.count == 1)
+            server.expireSession()
+            await #expect(throws: CPEError.authentication) { try await transport.keepAlive() }
+            await transport.close()
+        }
+    }
+
+    @Test func loginStartsHeartbeatAndFrequentSamplesDoNotSpamIt() async throws {
+        try await withServer { server, port in
+            let session = DeviceSession(address: try DeviceAddress("http://127.0.0.1:\(port)"))
+            _ = try await session.connect(username: "admin", password: "test-password")
+            #expect(server.log.filter { $0 == "HEARTBEAT" }.count == 1)
+            #expect(server.log.filter { $0 == "REFRESH_TIMEOUT" }.count == 1)
+            for _ in 0..<3 { _ = try await session.refresh() }
+            #expect(server.log.filter { $0 == "HEARTBEAT" }.count == 1)
+            #expect(server.log.filter { $0 == "REFRESH_TIMEOUT" }.count == 1)
+            await session.close()
+        }
+    }
+
     @Test func displacedLoginRequiresAuthenticationForSnapshotAndSMS() async throws {
         try await withServer { server, port in
             let session = DeviceSession(address: try DeviceAddress("http://127.0.0.1:\(port)"))

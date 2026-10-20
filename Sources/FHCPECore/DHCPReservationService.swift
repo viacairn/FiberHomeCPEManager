@@ -137,6 +137,20 @@ public struct DHCPReservationService: Sendable {
         return saved
     }
 
+    /// Delete only the exact binding that was read. Reused indices or another user's
+    /// concurrent edit must never turn cleanup into deletion of a different binding.
+    public func remove(_ reservation: DHCPReservation) async throws {
+        let existing = try await read()
+        guard let current = existing.first(where: { $0.mac == reservation.mac }) else { return }
+        guard current.ip == reservation.ip, let index = current.index,
+              reservation.index == index else { throw CPEError.uncertain }
+        try await FirmwareNodes(rpc: rpc).delete(root: String(Self.staticRoot.dropLast()), index: index)
+        let remaining = try await read()
+        guard !remaining.contains(where: { $0.mac == reservation.mac }) else {
+            throw CPEError.uncertain
+        }
+    }
+
     private func validateAddressPool(_ ip: String) async throws {
         let reply = try await rpc.call("get_value_by_xmlnode", data: .strings([
             "enabled": Self.lanRoot + "DHCPServerEnable",

@@ -14,22 +14,21 @@ public enum Theme {
     /// Width of the four-tab popover pages (overview, devices, controls, SMS, settings).
     /// Constant by design: the popover must never resize with its content.
     public static let compactWidth: CGFloat = 350
-    public static let compactHeight: CGFloat = 590
+    public static let compactHeight: CGFloat = 606
     public static let contentPadding: CGFloat = 16
     public static let tabBarHeight: CGFloat = 52
-    /// Clearance under the popover arrow, so page content never collides with it. This is
-    /// also the outer margin on every side of the page content: 16 pt left/right, 16 pt
-    /// above the first row, 16 pt between the content and the tab bar, and 16 pt below the
-    /// tab bar. Four equal sides, measured in the rendered PNGs.
+    public static let inlineControlRowHeight: CGFloat = 20
+    /// Preserve the original 16 pt outer margins. Only the requested shared title
+    /// consumes extra space; the page canvas derives its height from this chrome.
     public static let topInset: CGFloat = 16
-    public static let globalTitleHeight: CGFloat = 34
+    public static let globalTitleHeight: CGFloat = 20
+    public static let globalTitleGap: CGFloat = 6
     /// Space between the page canvas and the floating tab bar.
-    public static let tabBarGap: CGFloat = 16
+    public static let tabBarGap: CGFloat = 12
     /// Space between the floating tab bar and the bottom edge of the panel.
     public static let tabBarBottomInset: CGFloat = 16
-    /// Height available to the page canvas: panel minus the top inset, the gap above the
-    /// tab bar, the bar itself, and the bottom inset. Keeping this explicit is what stops
-    /// the old layout from overflowing by 22 pt and clipping the bar's bottom margin.
+    /// Canvas before subtracting the shared title (About has its own title). Never let
+    /// the page's intrinsic height grow the panel or push the navigation below its edge.
     public static var canvasHeight: CGFloat {
         compactHeight - topInset - tabBarGap - tabBarHeight - tabBarBottomInset
     }
@@ -84,6 +83,12 @@ public enum Theme {
         dark: NSColor(srgbRed: 0.10, green: 0.11, blue: 0.14, alpha: 0.92)
     )
 
+    /// Deterministic opaque fallback for stationary chrome when transparency is reduced.
+    public static let chromeBackdrop = dynamicColor(
+        light: NSColor(srgbRed: 0.922, green: 0.938, blue: 0.965, alpha: 1),
+        dark: NSColor(srgbRed: 0.10, green: 0.11, blue: 0.14, alpha: 1)
+    )
+
     /// Crisp white liquid-glass control fill for inputs, pills, buttons, and inner cards.
     public static let surface = dynamicColor(
         light: NSColor(srgbRed: 1.0, green: 1.0, blue: 1.0, alpha: 0.90),
@@ -101,10 +106,10 @@ public enum Theme {
     )
 
     /// White Liquid Glass panel fill with subtle vertical luminance gradient.
-    public static var panelFill: LinearGradient {
-        LinearGradient(colors: [panelTop, panelBottom],
-                       startPoint: .top, endPoint: .bottom)
-    }
+    public static let panelFill = LinearGradient(
+        colors: [panelTop, panelBottom],
+        startPoint: .top, endPoint: .bottom
+    )
 
     /// Specular inner highlight along the top edge of glass panels.
     public static let panelHighlight = LinearGradient(
@@ -168,7 +173,7 @@ public enum Theme {
     public static let metricUnit = Font.system(size: 10.5, weight: .semibold)
     public static let metricCaption = Font.system(size: 11, weight: .semibold)
     /// Page titles ("在线设备", "设置").
-    public static let pageTitle = Font.system(size: 16, weight: .bold)
+    public static let pageTitle = Font.system(size: 14, weight: .bold)
     public static let sectionTitle = Font.system(size: 11.5, weight: .bold)
     public static let body = Font.system(size: 12.5, weight: .medium)
     public static let footnote = Font.system(size: 10.5, weight: .medium)
@@ -317,6 +322,7 @@ public struct DiamondShape: Shape {
 }
 
 public struct SignalBars: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     public let level: Int?          // nil = unknown, 0...4 = filled bars
     public var activeColor: Color = .primary
     public var inactiveColor: Color = .secondary.opacity(0.28)
@@ -338,13 +344,17 @@ public struct SignalBars: View {
             }
         }
         .frame(height: unit * 4 + barWidth, alignment: .bottom)
+        .animation(reduceMotion ? nil : .spring(response: 0.32, dampingFraction: 0.78), value: level)
         .accessibilityElement()
         .accessibilityLabel(accessibilityText)
+        .accessibilityValue(accessibilityText)
     }
 
     /// Unknown readings are drawn as outlines so they cannot be confused with "no signal",
-    /// which is four dimmed solid bars.
+    /// which is four dimmed solid bars. Active bars animate both fill and subtle scale/opacity
+    /// when `level` changes dynamically.
     @ViewBuilder private func barView(_ index: Int) -> some View {
+        let active = isActive(index)
         let height = unit * CGFloat(index + 1) + barWidth
         let shape = RoundedRectangle(cornerRadius: barWidth / 2, style: .continuous)
         if level == nil {
@@ -353,14 +363,15 @@ public struct SignalBars: View {
                 .frame(width: barWidth, height: height)
         } else {
             shape
-                .fill(isActive(index) ? activeColor : inactiveColor)
+                .fill(active ? activeColor : inactiveColor)
                 .frame(width: barWidth, height: height)
+                .scaleEffect(x: 1.0, y: active ? 1.0 : 0.92, anchor: .bottom)
         }
     }
 
     private func isActive(_ index: Int) -> Bool {
         guard let level else { return false }
-        return index < level
+        return index < max(0, min(4, level))
     }
 
     private var accessibilityText: String {
@@ -386,7 +397,12 @@ public struct MetricCell: View {
 
     public var body: some View {
         VStack(spacing: 3) {
-            HStack(alignment: .firstTextBaseline, spacing: 3) {
+            HStack(alignment: .top, spacing: 3) {
+                if let unit, value != nil {
+                    // Mirror the unit's width so the number, rather than the combined
+                    // number/unit group, remains centred over its caption (v6 reference).
+                    Text(unit).font(Theme.metricUnit).hidden().accessibilityHidden(true)
+                }
                 Text(value ?? "—")
                     .font(valueFont)
                     .foregroundStyle(value == nil ? Theme.inkMuted : Color.primary)
@@ -397,6 +413,9 @@ public struct MetricCell: View {
                     Text(unit)
                         .font(Theme.metricUnit)
                         .foregroundStyle(Theme.inkSecondary)
+                        .fixedSize()
+                        .padding(.top, 2)
+                        .accessibilityHidden(true)
                 }
             }
             .frame(maxWidth: .infinity)
@@ -486,9 +505,19 @@ public struct LevelMeter: View {
     }
 }
 
-/// Thresholds for the three RF readings, using the values carriers publish as
-/// "good / fair / poor" for 5G NR.
+/// Relative RF display levels; these never determine connection availability.
 public enum SignalQuality {
+    /// 4G/5G RSSI reference bands (Teltonika's published signal recommendations).
+    /// RSSI includes noise and bandwidth; its display scale differs from RSRP.
+    public static func rssi(_ value: Double?) -> (level: Int, tint: Color) {
+        guard let value, value.isFinite else { return (0, .secondary) }
+        if value > -65 { return (5, Theme.positive) }
+        if value > -75 { return (4, Theme.positive) }
+        if value > -85 { return (3, Theme.warning) }
+        if value > -95 { return (2, Theme.warning) }
+        return (1, Theme.negative)
+    }
+
     public static func rsrp(_ value: Double?) -> (level: Int, tint: Color) {
         guard let value else { return (0, .secondary) }
         if value >= -80 { return (5, Theme.positive) }

@@ -35,6 +35,8 @@ public enum MenuBarGeometry {
     /// Measured widest reading at 11 pt medium monospaced digits ("5.76 Mbps") is ≈57.8 pt;
     /// reserving 58 pt means no legal string is ever shrunk or clipped.
     public static let numberWidth: CGFloat = 58
+    /// Total empty space in the status item, 3 pt per side. Keep the artwork intact.
+    public static let itemHorizontalPadding: CGFloat = 6
 
     public static var payloadWidth: CGFloat { barsWidth + gap + numberWidth }
 
@@ -45,6 +47,10 @@ public enum MenuBarGeometry {
         case .signalOnly: barsWidth
         case .signalAndRate: payloadWidth
         }
+    }
+
+    public static func statusItemWidth(for style: MenuBarStyle) -> CGFloat {
+        width(for: style) + itemHorizontalPadding
     }
 
     /// Horizontal origin of every bar in the segment.
@@ -90,7 +96,8 @@ public enum MenuBarGeometry {
     /// Every horizontal/vertical quantity that must sit on the half-point grid.
     public static var gridValues: [CGFloat] {
         [height, barWidth, barGap, barsWidth, maxBarHeight, barTop, gap,
-         numberWidth, payloadWidth,
+         numberWidth, payloadWidth, itemHorizontalPadding,
+         statusItemWidth(for: .signalOnly), statusItemWidth(for: .signalAndRate),
          width(for: .signalOnly), width(for: .signalAndRate)]
             + (0..<barCount).flatMap { [barOrigin($0), barHeight($0)] }
     }
