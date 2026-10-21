@@ -31,7 +31,7 @@ struct CredentialStoreTests {
         client.data = try JSONEncoder().encode(credentials)
         #expect(try CredentialStore(service: "test", keychain: client).load() == credentials)
         let query = try #require(client.requests.first)
-        #expect(query[kSecUseAuthenticationUI as String] as? String == kSecUseAuthenticationUIFail as String)
+        #expect(query[kSecUseAuthenticationUI as String] == nil)
         #expect((query[kSecUseAuthenticationContext as String] as? LAContext)?.interactionNotAllowed == true)
     }
 

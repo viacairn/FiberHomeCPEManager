@@ -19,6 +19,9 @@ PERSONAL_HOME = re.compile(re.escape(HOME_PREFIX) + r"(?!example/|developer/|USE
 CREDENTIAL = re.compile(r"\bCPE_PASS\s*=\s*(['\"])([^'\"\n]*)\1")
 PLACEHOLDERS = {"", "…", "...", "example-password", "your-password", "change-me"}
 
+def is_local_api_path(path):
+    return tuple(part.lower() for part in Path(path).parts[:2]) == ("docs", "protocol")
+
 
 def text_findings(data, plan=None):
     try:
@@ -93,6 +96,8 @@ def payload_findings(data, plan=None):
 def path_findings(path):
     p = Path(path)
     name = p.name.lower()
+    if is_local_api_path(path):
+        return ["local-api-document-must-not-sync"]
     if name == ".gitignore":
         return ["gitignore-must-remain-local"]
     if name.startswith(".env") and name != ".env.example":
@@ -136,6 +141,11 @@ def main():
         if name == ".gitignore" or "__pycache__" in Path(name).parts or Path(name).parts[0] in {".build", "build", "render", ".swiftpm"}:
             continue
         path = root / name
+        if is_local_api_path(name) and path.suffix.lower() == ".md":
+            if path.is_file():
+                for kind in payload_findings(path.read_bytes(), plan):
+                    findings.append((name, kind))
+            continue
         if path.is_file():
             findings.append((name, "ignored-file-outside-build-roots"))
     objects_checked = 0
@@ -148,7 +158,7 @@ def main():
                 for finding in payload_findings(git(root, "cat-file", kind, oid), plan):
                     findings.append(("object:" + oid, finding))
             elif kind == "tree":
-                for entry in git(root, "ls-tree", "-z", oid).split(b"\0"):
+                for entry in git(root, "ls-tree", "-r", "-z", oid).split(b"\0"):
                     if entry:
                         name = entry.split(b"\t", 1)[1].decode("utf-8", errors="replace")
                         for finding in path_findings(name):

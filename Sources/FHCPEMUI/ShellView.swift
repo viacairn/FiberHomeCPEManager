@@ -72,8 +72,8 @@ public struct ShellView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .onChange(of: model.tab) { _, tab in
-            // Entering 控制 re-reads the device settings once. The 1 Hz refresh loop no
-            // longer touches settings, so the switches cannot flicker between samples.
+            // Tab entry requests a quiet read; the independent three-second sampler
+            // never switches the controls into a user-write busy state.
             if tab == 2, model.route == .main { model.onControlsSelected() }
             if tab == 3, model.route == .main { model.onSMSSelected() }
         }

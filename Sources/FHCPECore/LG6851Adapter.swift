@@ -10,7 +10,7 @@ public protocol DeviceAdapter: Sendable {
 /// LG6851F adapter.
 ///
 /// Node names come from the device's own public `get_xmlnode_js_file` mapping, and the
-/// value semantics follow the RP0112 contract in docs/protocol/WEB-API.md.
+/// value semantics follow the verified RP0112 contract and local regression fixtures.
 /// The adapter never invents a node
 /// name, and anything the device omits stays `nil` and renders as "—".
 public struct LG6851Adapter: DeviceAdapter {

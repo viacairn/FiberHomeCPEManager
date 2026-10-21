@@ -23,8 +23,7 @@ public struct CredentialStore: Sendable {
                 kSecAttrService as String: service,
                 kSecAttrAccount as String: "connection",
                 kSecAttrSynchronizable as String: false,
-                kSecUseAuthenticationContext as String: context,
-                kSecUseAuthenticationUI as String: kSecUseAuthenticationUIFail]
+                kSecUseAuthenticationContext as String: context]
     }
     public func load() throws -> Credentials? {
         var request = query

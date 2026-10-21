@@ -8,6 +8,7 @@ import FHCPEMUI
 /// live device session. Not part of the shipped app bundle.
 @main
 struct UIRender {
+    @MainActor private static var previewWindow: NSWindow?
     @MainActor
     static func main() {
         let args = CommandLine.arguments
@@ -18,6 +19,26 @@ struct UIRender {
         }
         let app = NSApplication.shared
         app.setActivationPolicy(.accessory)
+        if args.contains("--interactive-preview") || ProcessInfo.processInfo.environment["FHCPEM_INTERACTIVE_PREVIEW"] == "1" {
+            app.setActivationPolicy(.regular)
+            let model = Fixtures().connected(tab: 0)
+            let controller = PopoverHostingController(rootView: ShellView(model: model),
+                                                     designSize: NSSize(width: Theme.compactWidth, height: Theme.compactHeight))
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: Theme.compactWidth, height: Theme.compactHeight),
+                                  styleMask: [.titled, .closable], backing: .buffered, defer: false)
+            window.title = "FiberHome CPE Manager · 模拟数据预览"
+            window.contentViewController = controller
+            window.center()
+            window.makeKeyAndOrderFront(nil)
+            previewWindow = window
+            app.activate(ignoringOtherApps: true)
+            app.run()
+            return
+        }
+        if args.contains("--controls-performance-audit") {
+            auditControlsPerformance()
+            return
+        }
         if args.contains("--chrome-audit") {
             auditPopover()
             return
@@ -40,6 +61,31 @@ struct UIRender {
             for issue in renderer.horizontalOverflow { print("LAYOUT FAIL: \(issue)") }
             exit(2)
         }
+    }
+
+    @MainActor private static func auditControlsPerformance() {
+        let model = Fixtures().connected(tab: 0)
+        let controller = PopoverHostingController(rootView: ShellView(model: model),
+                                                 designSize: NSSize(width: Theme.compactWidth, height: Theme.compactHeight))
+        let host = controller.view
+        let window = NSWindow(contentRect: host.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        window.setFrameOrigin(NSPoint(x: -4000, y: -4000))
+        window.contentViewController = controller
+        host.layoutSubtreeIfNeeded()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        for (index, tab) in [2, 0, 2, 0, 2].enumerated() {
+            let start = ProcessInfo.processInfo.systemUptime
+            model.tab = tab
+            host.layoutSubtreeIfNeeded()
+            let layoutMS = (ProcessInfo.processInfo.systemUptime - start) * 1000
+            if let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds) {
+                host.cacheDisplay(in: host.bounds, to: bitmap)
+            }
+            let ms = (ProcessInfo.processInfo.systemUptime - start) * 1000
+            print("tab=\(tab), pass=\(index + 1), layout-ms=\(String(format: "%.2f", layoutMS)), layout-and-draw-ms=\(String(format: "%.2f", ms))")
+            RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        }
+        window.contentView = nil
     }
 
     @MainActor private static func auditPopover() {
@@ -408,15 +454,16 @@ final class Renderer {
         let root = body()
             .frame(width: width, height: height)
             .background(dark ? Color.black : Color.white)
-        let hosting = NSHostingView(rootView: ForcedAppearance(content: root, dark: dark))
-        // Keep the fixture canvas fixed while AppKit applies the appearance. Default
-        // hosting-size propagation can resize a later window during its first layout.
-        hosting.sizingOptions = []
+        // Match the application's safe-area and scroll configuration. A plain hosting
+        // view can misplace a nested page's safe-area bars in a borderless window.
+        let controller = PopoverHostingController(rootView: ForcedAppearance(content: root, dark: dark),
+                                                 designSize: NSSize(width: width, height: height))
+        let hosting = controller.view
         hosting.frame = CGRect(x: 0, y: 0, width: width, height: height)
         let window = NSWindow(contentRect: hosting.frame,
                               styleMask: [.borderless],
                               backing: .buffered, defer: false)
-        window.contentView = hosting
+        window.contentViewController = controller
         window.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
         window.orderFrontRegardless()
         hosting.layoutSubtreeIfNeeded()

@@ -1166,6 +1166,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     }
 
     private func apply(_ reading: SessionReading) {
+        let firstLiveReading = !model.data.isLive
         let nextData = PageData(snapshot: reading.snapshot, devices: reading.devices,
                                 stale: false, connected: true)
         if model.data != nextData { model.data = nextData }
@@ -1180,6 +1181,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         model.lanAddress = currentCredentials.flatMap { try? DeviceAddress($0.address).hostText } ?? ""
         model.statusMessage = nil
         onStatusItemNeedsUpdate?()
+        // Prime the in-memory controls state as soon as this connection is usable.
+        // The first Controls click must not be the first mobile-network API request.
+        if firstLiveReading { reloadMobileNetwork() }
     }
 
     /// Persists the display style and refreshes the menu-bar item. Called whenever the
@@ -1636,7 +1640,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                 let state = try await session.readMobileNetwork()
                 guard self.isCurrent(id, epoch: epoch), readGeneration == self.mobileReadGeneration else { return }
                 self.mobileReadInFlight = false
-                self.model.mobileNetwork = state
+                if self.model.mobileNetwork != state { self.model.mobileNetwork = state }
             } catch {
                 guard self.isCurrent(id, epoch: epoch), readGeneration == self.mobileReadGeneration else { return }
                 self.mobileReadInFlight = false

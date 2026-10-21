@@ -6,7 +6,7 @@ import Foundation
 ///
 /// These never touch the real router and never read a Keychain item: the fake server only
 /// accepts the literal test password. Its responses reproduce the quirks observed on the
-/// live RP0112 unit (see docs/protocol/WEB-API.md), so a regression in
+/// RP0112 protocol contract, so a regression in
 /// parsing shows up here instead of on the user's network.
 @Suite(.serialized)
 struct EndToEndTests {

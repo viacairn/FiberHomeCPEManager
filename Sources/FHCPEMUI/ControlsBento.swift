@@ -65,21 +65,29 @@ public struct ControlsPage: View {
     @State private var pendingUplink: UplinkTarget?
     @State private var fanMenuOpen = false
 
+    private enum Section: CaseIterable { case mobile, uplink, services, wifi, reboot, hardware }
+
     public var body: some View {
         VStack(spacing: 0) {
             if isLive {
                 ScrollView(.vertical) {
-                    VStack(alignment: .leading, spacing: Theme.Space.m) {
-                        MobileNetworkSection(state: mobile, busy: busy,
-                                             onSetAirplane: onSetAirplaneMode,
-                                             onSetCellular: onSetCellularData,
-                                             onSaveAntenna: onSaveAntenna)
-                        uplinkSection
-                        NetworkServicesSection(ddnsCount: ddnsCount, portCount: portMappingCount,
-                                               onOpenDDNS: onOpenDDNS, onOpenPorts: onOpenPortMapping)
-                        wifiSection
-                        rebootSection
-                        hardwareSection
+                    LazyVStack(alignment: .leading, spacing: Theme.Space.m) {
+                        ForEach(Section.allCases, id: \.self) { section in
+                            switch section {
+                            case .mobile:
+                                MobileNetworkSection(state: mobile, busy: busy,
+                                                     onSetAirplane: onSetAirplaneMode,
+                                                     onSetCellular: onSetCellularData,
+                                                     onSaveAntenna: onSaveAntenna)
+                            case .uplink: uplinkSection
+                            case .services:
+                                NetworkServicesSection(ddnsCount: ddnsCount, portCount: portMappingCount,
+                                                       onOpenDDNS: onOpenDDNS, onOpenPorts: onOpenPortMapping)
+                            case .wifi: wifiSection
+                            case .reboot: rebootSection
+                            case .hardware: hardwareSection
+                            }
+                        }
                     }
                     .padding(.horizontal, Theme.contentPadding)
                     .padding(.top, 0)

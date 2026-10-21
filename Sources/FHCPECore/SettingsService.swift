@@ -26,7 +26,7 @@ public struct WiFiNetwork: Identifiable, Sendable, Equatable {
 /// Only the three fixed modes are writable here (via `X_FH_CurrentWANDevice` and
 /// `X_FH_Multiwan_Aggregation.Enable`, verified by read-back). The two failover modes are
 /// listed so the UI matches the device, but stay disabled until the stock page's submit
-/// payload (`wanSelectSubmit`) has been confirmed — see docs/protocol/WEB-API.md.
+/// payload (`wanSelectSubmit`) and read-back behavior have been confirmed.
 public enum UplinkTarget: String, Sendable, CaseIterable, Codable {
     case cellular, ethernet, cellularPreferred, ethernetPreferred, aggregation
 

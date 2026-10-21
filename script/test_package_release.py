@@ -6,12 +6,31 @@ import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
+from types import SimpleNamespace
 
 import check_privacy
 import package_release as release
 
 
 class PackageReleaseTests(unittest.TestCase):
+    def test_modern_disk_image_tool_is_selected_by_capability(self):
+        for status, output, expected in [(0, b"USAGE --volumeName <name>", True),
+                                          (1, b"unknown command", False)]:
+            with patch.object(release.subprocess, "run", return_value=SimpleNamespace(returncode=status, stdout=output)):
+                self.assertEqual(release.supports_diskutil_images(), expected)
+
+    def test_local_api_notes_are_never_exported_even_when_force_tracked(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            subprocess.run(["git", "init", "-q", str(root)], check=True)
+            release.configure_local_excludes(root)
+            notes = root / "docs/protocol/WEB-API.md"
+            notes.parent.mkdir(parents=True)
+            notes.write_text("local protocol notes")
+            subprocess.run(["git", "add", "-f", str(notes)], cwd=root, check=True)
+            self.assertNotIn("docs/protocol/WEB-API.md", release.public_paths(root))
+            self.assertTrue(check_privacy.path_findings("docs/protocol/WEB-API.md"))
+
     def test_fresh_checkout_excludes_local_artifacts_without_tracking_gitignore(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

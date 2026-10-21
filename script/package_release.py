@@ -26,7 +26,8 @@ def run(*args, cwd=ROOT, capture=False, env=None):
 
 def public_paths(root=ROOT):
     data = run("git", "ls-files", "-co", "--exclude-standard", "-z", cwd=root, capture=True)
-    return sorted({name for name in data.decode().split("\0") if name and (root / name).is_file()})
+    return sorted({name for name in data.decode().split("\0")
+                   if name and (root / name).is_file() and not check_privacy.is_local_api_path(name)})
 
 
 def configure_local_excludes(root=ROOT):
@@ -40,7 +41,8 @@ def configure_local_excludes(root=ROOT):
     path.parent.mkdir(parents=True, exist_ok=True)
     existing = path.read_text() if path.exists() else ""
     entries = ["/.gitignore", "/.build/", "/build/", "/render/", "/.swiftpm/", "/.worktrees/",
-               ".DS_Store", "__pycache__/", "*.py[cod]", "/.env", "/.env.*", "/.local-private/"]
+               ".DS_Store", "__pycache__/", "*.py[cod]", "/.env", "/.env.*", "/.local-private/",
+               "/docs/protocol/"]
     missing = [entry for entry in entries if entry not in existing.splitlines()]
     if missing:
         path.write_text(existing.rstrip() + "\n\n# Local-only artifacts and private settings\n" + "\n".join(missing) + "\n")
@@ -152,17 +154,35 @@ def build_app(work, output, names, architectures):
     return app
 
 
+def supports_diskutil_images():
+    try:
+        result = subprocess.run(["diskutil", "image", "create", "from", "--help"],
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+    except FileNotFoundError:
+        return False
+    return result.returncode == 0 and b"--volumeName" in result.stdout
+
+
 def package_image(work, app, destination, plan, architectures):
     stage = work / "disk-image"
     stage.mkdir()
     shutil.copytree(app, stage / app.name)
     (stage / "Applications").symlink_to("/Applications", target_is_directory=True)
-    run("hdiutil", "create", "-volname", "FiberHome CPE Manager", "-srcfolder", stage,
-        "-format", "UDZO", "-imagekey", "zlib-level=9", "-ov", destination)
-    run("hdiutil", "verify", destination)
+    image = work / "validated-release.dmg"
+    modern = supports_diskutil_images()
+    if modern:
+        run("diskutil", "image", "create", "from", "--format", "UDZO",
+            "--volumeName", "FiberHome CPE Manager", stage, image)
+    else:
+        run("hdiutil", "create", "-volname", "FiberHome CPE Manager", "-srcfolder", stage,
+            "-format", "UDZO", "-imagekey", "zlib-level=9", "-ov", image)
+    run("hdiutil", "verify", image)
     mount = work / "mounted"
     mount.mkdir()
-    run("hdiutil", "attach", "-readonly", "-nobrowse", "-mountpoint", mount, destination, capture=True)
+    if modern:
+        run("diskutil", "image", "attach", "--readOnly", "--nobrowse", "--mountPoint", mount, image, capture=True)
+    else:
+        run("hdiutil", "attach", "-readonly", "-nobrowse", "-mountpoint", mount, image, capture=True)
     try:
         # The mounted payload, rather than just the staging directory, is the final audit target.
         if not (mount / "Applications").is_symlink() or os.readlink(mount / "Applications") != "/Applications":
@@ -170,9 +190,13 @@ def package_image(work, app, destination, plan, architectures):
         allowed = {app.name, "Applications", ".fseventsd", ".Trashes", ".HFS+ Private Directory Data\r"}
         if {p.name for p in mount.iterdir()} - allowed:
             raise RuntimeError("Unexpected file at DMG root")
-        return audit_app(mount / app.name, plan, architectures)
+        checked = audit_app(mount / app.name, plan, architectures)
     finally:
-        run("hdiutil", "detach", mount)
+        run("diskutil", "eject", mount)
+    pending = destination.with_name("." + destination.name + ".partial")
+    shutil.copyfile(image, pending)
+    pending.replace(destination)
+    return checked
 
 
 def main():

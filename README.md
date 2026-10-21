@@ -1,50 +1,75 @@
 # FiberHome CPE Manager
 
-烽火 CPE 的原生 macOS 菜单栏管理工具，支持 Apple Silicon，macOS 14+。Swift / SwiftUI；当前版本 1.0-Beta。
+烽火 CPE 的原生 macOS 菜单栏管理工具。查看蜂窝信号、网速、在线设备和短信，也可以直接管理常用网络与硬件设置。
 
-## 功能
+当前版本 **1.0-Beta** · Apple Silicon · macOS 14 及以上 · Apache-2.0
 
-- 概览：动态信号、运营商、蜂窝参数、实时网速和流量；断线清空 API 数据。
-- 设备：搜索、接入类型筛选、通用设备图标与手动选择、静态 IP 绑定。
-- 控制：移动网络、上网模式、DDNS、端口映射、Wi-Fi、定时重启、风扇、指示灯、外置天线、小区与频段互斥锁定。
-- 短信：会话、发送、自动刷新与当前会话已读；内容仅在内存中。
-- 菜单栏：信号强度、网速、重新登录、关于与退出应用；包含桌面磁贴。
-- 连接：每 3 秒刷新数据、每 30 秒续期当前登录；关闭弹窗后继续执行。
+## 界面预览
 
-## 构建
+| 概览 | 设备 |
+| --- | --- |
+| <img src="docs/images/overview.png" width="350" alt="使用模拟数据的概览页面"> | <img src="docs/images/devices.png" width="350" alt="使用模拟数据的设备页面"> |
+| 控制 | 短信 |
+| <img src="docs/images/controls.png" width="350" alt="使用模拟数据的控制页面"> | <img src="docs/images/sms.png" width="350" alt="使用模拟数据的短信页面"> |
 
-需要匹配的 Swift 6 工具链和 macOS SDK。当前开发环境使用 Swift 6.4 / MacOSX26.5.sdk，脚本在该 SDK 存在时优先使用。
+## 已实现
+
+| 模块 | 功能 |
+| --- | --- |
+| 概览 | 动态信号、运营商、蜂窝参数、实时上下行速率、今日与本月流量 |
+| 基站与小区 | 服务小区、邻区、载波信息，小区锁定与频段锁定互斥操作 |
+| 设备 | 搜索、接入类型筛选、通用设备图标与手动指定、静态 IP 绑定 |
+| 移动网络 | 飞行模式、蜂窝数据、外置天线，以及已适配的上网模式 |
+| 网络服务 | DDNS、端口映射、Wi-Fi 广播与名称管理 |
+| 硬件 | 定时重启、指示灯、风扇模式 |
+| 短信 | 会话、发送、自动同步、可见会话自动已读 |
+| 菜单栏与桌面 | 信号与网速显示、重新登录、桌面磁贴 |
+
+数据每 3 秒刷新。关闭面板后仍继续刷新并续期当前会话；断线时清空设备和短信，未知指标显示为 `—`，正常读取的零速率显示为 `0`。
+
+## 未完成功能
+
+| 功能 | 当前状态 | 说明 |
+| --- | --- | --- |
+| MLO 多链路聚合 | 占位展示 | 我没有 Wi-Fi7 设备，用不上懒得做 |
+| 蜂窝优先 | 占位展示 | 难道你是富哥同时续费流量卡再插着宽带？ |
+| 以太网优先 | 占位展示 | 难道你是富哥同时续费流量卡再插着宽带？ |
+
+## 使用
+
+1. 打开 DMG，将应用拖入 Applications 后启动。应用入口位于 macOS 菜单栏。
+2. 点击信号图标，输入设备管理地址、账号和密码；也可以导入默认网关。
+3. 按需启用保存密码。密码保存在系统钥匙串，短信与会话令牌只保留在内存中。
+
+其他入口重新登录可能使当前会话失效。此时应用会清空数据并返回登录页，也可以从菜单栏右键菜单主动重新登录。
+
+目前已适配 LG6851F / RP0112。其他型号与固件的验证范围见 [兼容性](docs/COMPATIBILITY.md)。
+
+## 构建与打包
+
+需要 Swift 6 和匹配的 macOS SDK。当前验证环境为 Swift 6.4 / MacOSX26.5.sdk；脚本在该 SDK 可用时优先使用。
 
 ```sh
-python3 script/package_release.py --configure-only
-./script/build_and_run.sh
-./script/build_and_run.sh --build-only
+./script/build_and_run.sh       # 构建并运行
+./script/build_dmg.sh           # 构建 Apple Silicon Release DMG
 ```
 
-应用位于 `build/FiberHomeCPEManager.app`。首次使用时输入设备管理地址、账号和密码；默认网关为 `192.168.8.1`。保存密码为可选功能，使用系统钥匙串。
-
-## DMG
+应用输出到 `build/FiberHomeCPEManager.app`；Release 安装包与 `SHA256SUMS` 输出到 `build/release/`。构建产物不进入 Git。
 
 ```sh
-./script/build_dmg.sh
+./script/test.sh
+python3 -m unittest discover -s script -p 'test_*.py'
 ```
 
-生成 Apple Silicon Release 安装包 `build/release/FiberHomeCPEManager-1.0-Beta.dmg`，附 `SHA256SUMS`。打开 DMG 后将应用拖入 Applications。
-
-打包前检查源码和 Git 历史；应用从隔离目录构建，剥离调试符号，校验主程序与磁贴，并挂载检查 DMG 内容。可使用 `--private-plan /仓库外/清单.json` 增加本地精确脱敏检查。
-
-## 开发与协议
-
+- [开发与打包说明](docs/DEVELOPMENT.md)
 - [测试流程](docs/TESTING.md)
-- [隐私说明](docs/PRIVACY.md)
-- [UI 规格](docs/UI-SPEC.md)
-- [兼容性](docs/COMPATIBILITY.md)
-- [Web API](docs/protocol/WEB-API.md)
-- [会话互斥](docs/protocol/SESSIONS.md)
-- [高级控制](docs/protocol/ADVANCED-CONTROLS.md)
+- [界面与交互](docs/UI-SPEC.md)
+- [隐私与本地数据](docs/PRIVACY.md)
 
-`.gitignore` 不进入提交；本地排除规则保存在 `.git/info/exclude`，构建和打包产物不进入源码仓库。设备数据、截图与凭据不随项目分发。
+## 适配其他设备
+
+买不起，不做
 
 ## 许可证
 
-[Apache License 2.0](LICENSE)，版权信息见 [NOTICE](NOTICE)。应用资源中同时包含许可证和 NOTICE。
+项目采用 [Apache License 2.0](LICENSE)，版权说明见 [NOTICE](NOTICE)。
