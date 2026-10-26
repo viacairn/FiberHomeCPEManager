@@ -528,14 +528,15 @@ public enum MetricFormatter {
         }
         return text
     }
-    /// Decimal byte traffic: B / KB / MB / GB / TB, three significant digits.
+    /// Matches the stock WebUI's trafficFormat: 1024-based units labelled KB/MB/GB.
+    /// Preserve compact display rounding; network bit rates retain decimal prefixes.
     public static func bytes(_ value: Double?) -> (value: String, unit: String)? {
         guard let bytes = value, bytes.isFinite, bytes >= 0 else { return nil }
         let units = ["B", "KB", "MB", "GB", "TB"]
         var scaled = bytes, index = 0
-        while scaled >= 1000, index < units.count - 1 { scaled /= 1000; index += 1 }
+        while scaled >= 1024, index < units.count - 1 { scaled /= 1024; index += 1 }
         var text = significant(scaled)
-        if text == "1000", index < units.count - 1 { scaled /= 1000; index += 1; text = significant(scaled) }
+        if text == "1024", index < units.count - 1 { scaled /= 1024; index += 1; text = significant(scaled) }
         return (text, units[index])
     }
     /// Maps RSRP/SINR evidence to 0–4 bars. Returns nil rather than guessing when the
