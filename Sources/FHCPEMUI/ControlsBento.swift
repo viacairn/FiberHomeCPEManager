@@ -11,11 +11,11 @@ import FHCPECore
 public struct ControlsPage: View {
     public let settings: DeviceSettings?
     public let busy: Bool
-    public let status: String?
-    public let statusIsError: Bool
     public let isLive: Bool
     public let onToggleSSID: (WiFiNetwork, Bool) -> Void
     public let onRenameSSID: (WiFiNetwork, String) -> Void
+    public let onRebootDevice: () -> Void
+    public let rebooting: Bool
     public let onSaveReboot: (Bool, String, String) -> Void
     public let onSaveLED: (Bool) -> Void
     public let onSaveFan: (FanMode) -> Void
@@ -30,8 +30,7 @@ public struct ControlsPage: View {
     public let onOpenDDNS: () -> Void
     public let onOpenPortMapping: () -> Void
 
-    public init(settings: DeviceSettings?, busy: Bool, status: String?,
-                statusIsError: Bool = false, isLive: Bool = true,
+    public init(settings: DeviceSettings?, busy: Bool, isLive: Bool = true,
                 onToggleSSID: @escaping (WiFiNetwork, Bool) -> Void,
                 onRenameSSID: @escaping (WiFiNetwork, String) -> Void,
                 onSaveReboot: @escaping (Bool, String, String) -> Void,
@@ -45,9 +44,10 @@ public struct ControlsPage: View {
                 onSaveAntenna: @escaping (Bool, AntennaType) -> Void = { _, _ in },
                 ddnsCount: Int? = nil, portMappingCount: Int? = nil,
                 onOpenDDNS: @escaping () -> Void = {},
-                onOpenPortMapping: @escaping () -> Void = {}) {
-        self.settings = settings; self.busy = busy; self.status = status
-        self.statusIsError = statusIsError; self.isLive = isLive
+                onOpenPortMapping: @escaping () -> Void = {},
+                onRebootDevice: @escaping () -> Void = {}, rebooting: Bool = false) {
+        self.settings = settings; self.busy = busy; self.isLive = isLive
+        self.onRebootDevice = onRebootDevice; self.rebooting = rebooting
         self.onToggleSSID = onToggleSSID; self.onRenameSSID = onRenameSSID
         self.onSaveReboot = onSaveReboot; self.onSaveLED = onSaveLED; self.onSaveFan = onSaveFan
         self.switchingTo = switchingTo; self.onSwitchUplink = onSwitchUplink
@@ -64,6 +64,7 @@ public struct ControlsPage: View {
     @State private var draftWeekday = "Everyday"
     @State private var pendingUplink: UplinkTarget?
     @State private var fanMenuOpen = false
+    @State private var confirmReboot = false
 
     private enum Section: CaseIterable { case mobile, uplink, services, wifi, reboot, hardware }
 
@@ -95,9 +96,23 @@ public struct ControlsPage: View {
                 }
                 .scrollIndicators(.automatic)
                 .scrollBounceBehavior(.basedOnSize)
+            } else if rebooting {
+                VStack(spacing: Theme.Space.s) {
+                    ProgressView().controlSize(.small)
+                    Text("正在重启路由器，等待重新连接…")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(Theme.inkSecondary)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 disconnectedState
             }
+        }
+        .confirmationDialog("立即重启路由器？", isPresented: $confirmReboot, titleVisibility: .visible) {
+            Button("立即重启", role: .destructive) { onRebootDevice() }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("重启期间网络会暂时中断，设备恢复后将自动重新连接。")
         }
         .onChange(of: settings) { _, value in
             guard isLive, let value else {
@@ -145,7 +160,7 @@ public struct ControlsPage: View {
 
     private func clearPendingControls() {
         rebootExpanded = false; draftTime = ""; draftWeekday = ""
-        pendingUplink = nil; fanMenuOpen = false
+        pendingUplink = nil; fanMenuOpen = false; confirmReboot = false
     }
 
     private var fanTitle: String {
@@ -165,9 +180,16 @@ public struct ControlsPage: View {
                     ProgressView().controlSize(.mini)
                 }
             }
-            HStack(spacing: 5) {
-                ForEach(UplinkTarget.allCases, id: \.self) { target in
-                    modeCard(target, active: active == target)
+            VStack(spacing: 6) {
+                HStack(spacing: 6) {
+                    ForEach(UplinkTarget.allCases.filter(\.isSupported), id: \.self) { target in
+                        modeCard(target, active: active == target)
+                    }
+                }
+                HStack(spacing: 6) {
+                    ForEach(UplinkTarget.allCases.filter { !$0.isSupported }, id: \.self) { target in
+                        pendingModeCard(target)
+                    }
                 }
             }
             if let pendingUplink {
@@ -201,6 +223,31 @@ public struct ControlsPage: View {
                 .overlay(bannerShape.strokeBorder(Theme.hairlineStrong, lineWidth: 0.75))
             }
         }
+    }
+
+    private func pendingModeCard(_ target: UplinkTarget) -> some View {
+        Button {} label: {
+            HStack(spacing: 6) {
+                Image(systemName: target.symbol)
+                    .font(.system(size: 10, weight: .medium))
+                Text(target.title)
+                    .font(.system(size: 10, weight: .semibold))
+                Spacer(minLength: 2)
+                Text("待适配")
+                    .font(.system(size: 8.5, weight: .medium))
+            }
+            .foregroundStyle(Theme.inkMuted)
+            .padding(.horizontal, 10)
+            .frame(maxWidth: .infinity)
+            .frame(height: 30)
+            .background(Theme.panelFill.opacity(0.6), in: RoundedRectangle(cornerRadius: Theme.Radius.row))
+            .overlay(RoundedRectangle(cornerRadius: Theme.Radius.row)
+                .strokeBorder(Theme.hairline, lineWidth: 0.75))
+        }
+        .buttonStyle(.plain)
+        .disabled(true)
+        .accessibilityLabel("\(target.title)，待适配")
+        .accessibilityHint("设备支持此模式，本工具尚未适配写入")
     }
 
     private func modeCard(_ target: UplinkTarget, active: Bool) -> some View {
@@ -344,7 +391,26 @@ public struct ControlsPage: View {
 
     private var rebootSection: some View {
         VStack(alignment: .leading, spacing: 6) {
-            PanelHeading("定时重启计划")
+            HStack(spacing: 8) {
+                PanelHeading("重启管理")
+                Spacer(minLength: 0)
+                Button { confirmReboot = true } label: {
+                    HStack(spacing: 4) {
+                        if rebooting { ProgressView().controlSize(.mini) }
+                        else { Image(systemName: "arrow.clockwise") }
+                        Text(rebooting ? "正在重启…" : "立即重启")
+                    }
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(Theme.warning)
+                    .padding(.horizontal, 9)
+                    .frame(height: 24)
+                    .background(Theme.warning.opacity(0.10), in: Capsule())
+                    .overlay(Capsule().strokeBorder(Theme.warning.opacity(0.28), lineWidth: 0.75))
+                }
+                .buttonStyle(.plain)
+                .disabled(busy || rebooting || settings == nil)
+                .accessibilityLabel("立即重启路由器，需要确认")
+            }
             Panel(padding: 8, spacing: 0) {
                 HStack(spacing: 8) {
                     Image(systemName: "clock.arrow.circlepath")
@@ -572,14 +638,27 @@ public struct ControlsPage: View {
                 }
             }
 
-            Panel(padding: 10, spacing: 2) {
-                HStack(spacing: 6) {
-                    Image(systemName: "rectangle.stack").font(.system(size: 11, weight: .medium)).foregroundStyle(Theme.inkSecondary)
-                    Text("MLO 多链路聚合").font(.system(size: 11.5, weight: .medium)).foregroundStyle(Theme.inkSecondary)
-                    Spacer(minLength: 0)
+            Panel(padding: 12, spacing: 0) {
+                HStack(spacing: 9) {
+                    Image(systemName: "rectangle.stack")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(Theme.inkSecondary)
+                        .frame(width: 24, height: 28)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("MLO 多链路聚合")
+                            .font(.system(size: 11.5, weight: .semibold))
+                            .foregroundStyle(Theme.inkSecondary)
+                        Text("多频段协同连接")
+                            .font(.system(size: 9.5))
+                            .foregroundStyle(Theme.inkMuted)
+                    }
+                    Spacer(minLength: 4)
                     Text(settings?.supportsMLO == true ? "\(settings?.mloGroups ?? 0) 个链路组" : "懒得做")
-                        .font(.system(size: 9.5, weight: .medium))
+                        .font(.system(size: 9, weight: .medium))
                         .foregroundStyle(Theme.inkMuted)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(Color.primary.opacity(0.06), in: Capsule())
                 }
             }
             .opacity(settings?.supportsMLO == true ? 1 : 0.78)

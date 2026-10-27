@@ -35,6 +35,7 @@ private actor RadioLockRPC: DeviceRPC {
     var cells: [LockedCell]
     var lte = "3"
     var nr = "78"
+    var bandReadOverride: JSONValue?
     var calls: [RadioLockCall] = []
     var statesAfterWrites: [[Bool]] = []
     var rejectBandDisable = false
@@ -63,7 +64,8 @@ private actor RadioLockRPC: DeviceRPC {
                    ignoreCellEnable: Bool = false, ignoreCandidateWrite: Bool = false,
                    invalidSwitch: Bool = false, airplaneEnabled: Bool = false,
                    carrierLockEnabled: Bool = false, carrierSerialNumbers: String = "",
-                   modemModel: String = "RG620T-EG", n79Enabled: Bool = false, emptyPCI: Bool = false) {
+                   modemModel: String = "RG620T-EG", n79Enabled: Bool = false, emptyPCI: Bool = false,
+                   bandReadOverride: JSONValue? = nil) {
         self.rejectBandDisable = rejectBandDisable; self.ignoreBandDisable = ignoreBandDisable
         self.ignoreCellEnable = ignoreCellEnable; self.ignoreCandidateWrite = ignoreCandidateWrite
         self.invalidSwitch = invalidSwitch
@@ -71,6 +73,7 @@ private actor RadioLockRPC: DeviceRPC {
         self.carrierSerialNumbers = carrierSerialNumbers; self.modemModel = modemModel
         self.n79Enabled = n79Enabled
         self.emptyPCI = emptyPCI
+        self.bandReadOverride = bandReadOverride
     }
 
     func call(_ method: String, data: JSONValue, publicAccess: Bool) async throws -> JSONValue {
@@ -86,7 +89,7 @@ private actor RadioLockRPC: DeviceRPC {
                 switch value.text {
                 case Self.cellRoot + "LockEnable": response[alias] = .string(invalidSwitch ? "unknown" : (cellEnabled ? "1" : "0"))
                 case Self.settingsRoot + "LockBandEnable": response[alias] = .string(bandEnabled ? "1" : "0")
-                case Self.settingsRoot + "LTELockBAND": response[alias] = .string(lte)
+                case Self.settingsRoot + "LTELockBAND": response[alias] = bandReadOverride ?? .string(lte)
                 case Self.settingsRoot + "NRLockBAND": response[alias] = .string(nr)
                 case Self.settingsRoot + "airplan_on": response[alias] = .string(airplaneEnabled ? "1" : "0")
                 case Self.settingsRoot + "CarrierLockEnable": response[alias] = .string(carrierLockEnabled ? "1" : "0")
@@ -147,6 +150,49 @@ private actor RadioLockRPC: DeviceRPC {
 }
 
 struct RadioLockTests {
+    @Test func lockingANewCellReadsCandidatesThenWritesAndRefreshesOnce() async throws {
+        let rpc = RadioLockRPC(bandEnabled: true)
+        let state = try await RadioLockService(rpc: rpc).lockCell(act: 1, arfcn: 1850, pci: nil)
+        #expect(state.cellLockEnabled && !state.bandLockEnabled)
+        #expect(state.cells.contains { $0.act == 1 && $0.arfcn == 1850 && $0.pci == nil })
+        let calls = await rpc.calls
+        #expect(calls.map(\.method) == ["get_xml_childnode_value", "set_value_by_xmlnode", "add_set_xmlnode",
+                                           "set_value_by_xmlnode", "get_value_by_xmlnode", "get_xml_childnode_value"])
+        #expect(calls[1].data["value"]["enable"].text == "0")
+        #expect(calls[2].data["url"].text == "X_FH_MobileNetwork.LockCellList.LockCell.")
+        #expect(calls[2].data["setNode"]["value"] == .strings(["act": "1", "arfcn": "1850", "pci": ""]))
+        #expect(calls[3].data["value"]["Enable"].text == "1")
+    }
+
+    @Test func lockingAnExistingCellDoesNotAddAnotherCandidateEvenWhenTheTableIsFull() async throws {
+        let rpc = RadioLockRPC(bandEnabled: true, cells: (1...20).map {
+            LockedCell(index: $0, act: 2, arfcn: 634464, pci: $0)
+        })
+        let state = try await RadioLockService(rpc: rpc).lockCell(act: 2, arfcn: 634464, pci: 1)
+        #expect(state.cellLockEnabled && !state.bandLockEnabled)
+        #expect(state.cells.count == 20)
+        let calls = await rpc.calls
+        #expect(calls.map(\.method) == ["get_xml_childnode_value", "set_value_by_xmlnode", "set_value_by_xmlnode",
+                                           "get_value_by_xmlnode", "get_xml_childnode_value"])
+    }
+
+    @Test func lockingANewCellRejectsAFullCandidateTableBeforeWriting() async {
+        let rpc = RadioLockRPC(cells: (1...20).map {
+            LockedCell(index: $0, act: 2, arfcn: 634464, pci: $0)
+        })
+        await #expect(throws: Error.self) { try await RadioLockService(rpc: rpc).lockCell(act: 2, arfcn: 634464, pci: 21) }
+        #expect(await rpc.calls.map(\.method) == ["get_xml_childnode_value"])
+        #expect(await rpc.statesAfterWrites.isEmpty)
+    }
+
+    @Test func lockingACellValidatesSyntaxBeforeAnyRequest() async {
+        let rpc = RadioLockRPC()
+        await #expect(throws: Error.self) { try await RadioLockService(rpc: rpc).lockCell(act: 3, arfcn: 634464, pci: 1) }
+        await #expect(throws: Error.self) { try await RadioLockService(rpc: rpc).lockCell(act: 2, arfcn: -1, pci: 1) }
+        await #expect(throws: Error.self) { try await RadioLockService(rpc: rpc).lockCell(act: 2, arfcn: 634464, pci: 2001) }
+        #expect(await rpc.calls.isEmpty)
+    }
+
     @Test func theStockEmptyPCICandidateIsRetainedWhenRead() async throws {
         let rpc = RadioLockRPC(cellEnabled: true)
         await rpc.configure(emptyPCI: true)
@@ -206,12 +252,7 @@ struct RadioLockTests {
         #expect(state.cells.contains { $0.pci == 0 })
     }
 
-    @Test func legacyCellLockBackendWritesAnEmptyPCIWithoutInventingZero() async throws {
-        let rpc = RecordingRPC()
-        try await LG6851LockBackend(rpc: rpc).apply(.cell(rat: 2, arfcn: 634464, pci: nil))
-        let add = try #require(rpc.calls.first { $0.method == "add_set_xmlnode" })
-        #expect(add.data["setNode"]["value"]["pci"] == .string(""))
-    }
+
 
     @Test func aPublicReadPreventsAConcurrentMutationFromMixingItsSnapshot() async throws {
         let gate = RadioLockReadGate()
@@ -238,8 +279,10 @@ struct RadioLockTests {
     }
 
     @Test func readsCandidatesEvenWhenTheCellSwitchIsOff() async throws {
-        let state = try await RadioLockService(rpc: RadioLockRPC()).read()
-        #expect(state.cells == [LockedCell(index: 3, act: 2, arfcn: 634464, pci: 101)])
+        let candidate = LockedCell(index: 3, act: 2, arfcn: 900000, pci: 3000)
+        let malformed = LockedCell(index: 4, act: 0, arfcn: 634464, pci: 101)
+        let state = try await RadioLockService(rpc: RadioLockRPC(cells: [candidate, malformed])).read()
+        #expect(state.cells == [candidate])
         #expect(state.mode == .automatic)
     }
 
@@ -255,18 +298,17 @@ struct RadioLockTests {
         #expect(after.cells.count == 1)
     }
 
-    @Test func enablingCellLockTurnsBandsOffAndReadsBackBeforeEnabling() async throws {
+    @Test func enablingCellLockWritesDirectlyThenRefreshesOnce() async throws {
         let rpc = RadioLockRPC(bandEnabled: true)
         let state = try await RadioLockService(rpc: rpc).setCellLockEnabled(true)
         #expect(state.cellLockEnabled && !state.bandLockEnabled)
         let calls = await rpc.calls
-        let disable = try #require(calls.firstIndex { $0.data["value"]["enable"].text == "0" })
-        let enable = try #require(calls.firstIndex { $0.data["value"]["Enable"].text == "1" })
-        #expect(disable < enable)
-        #expect(calls[(disable + 1)..<enable].contains { $0.method == "get_value_by_xmlnode" })
-        #expect(await rpc.statesAfterWrites.allSatisfy { $0 != [true, true] })
-        #expect(calls[enable].method == "set_value_by_xmlnode")
-        #expect(calls[enable].data["url"]["Enable"].text == "X_FH_MobileNetwork.LockCellList.LockEnable")
+        #expect(calls.map(\.method) == ["set_value_by_xmlnode", "set_value_by_xmlnode",
+                                           "get_value_by_xmlnode", "get_xml_childnode_value"])
+        #expect(calls[0].data["url"]["enable"].text == "X_FH_MobileNetwork.NetworkSettings.LockBandEnable")
+        #expect(calls[0].data["value"]["enable"].text == "0")
+        #expect(calls[1].data["url"]["Enable"].text == "X_FH_MobileNetwork.LockCellList.LockEnable")
+        #expect(calls[1].data["value"]["Enable"].text == "1")
     }
 
     @Test func rejectedBandDisableNeverEnablesCellLock() async {
@@ -276,43 +318,48 @@ struct RadioLockTests {
         #expect(await rpc.calls.allSatisfy { $0.data["value"]["Enable"].text != "1" })
     }
 
-    @Test func unconfirmedBandDisableNeverEnablesCellLock() async {
+    @Test func refreshReturnsTheReportedStateWithoutARepairWrite() async throws {
         let rpc = RadioLockRPC(bandEnabled: true)
         await rpc.configure(ignoreBandDisable: true)
-        await #expect(throws: Error.self) { try await RadioLockService(rpc: rpc).setCellLockEnabled(true) }
-        #expect(await rpc.calls.allSatisfy { $0.data["value"]["Enable"].text != "1" })
+        let state = try await RadioLockService(rpc: rpc).setCellLockEnabled(true)
+        #expect(state.hasConflict)
+        #expect(await rpc.statesAfterWrites.count == 2)
     }
 
-    @Test func enablingCellLockRequiresAConfirmedCandidateAndSwitch() async {
-        let empty = RadioLockRPC(cells: [])
-        await #expect(throws: Error.self) { try await RadioLockService(rpc: empty).setCellLockEnabled(true) }
-        #expect(await empty.statesAfterWrites.isEmpty)
-        let ignored = RadioLockRPC()
-        await ignored.configure(ignoreCellEnable: true)
-        await #expect(throws: Error.self) { try await RadioLockService(rpc: ignored).setCellLockEnabled(true) }
-    }
-
-    @Test func bandWriteUsesOneThreeFieldRequestAndMergesB12B17() async throws {
-        let rpc = RadioLockRPC(cellEnabled: true)
-        await rpc.configure(modemModel: "RG620T-NA")
-        let state = try await RadioLockService(rpc: rpc).setBandLockEnabled(true, lte: [17, 2, 2], nr: [78])
-        #expect(state.mode == .bands(lte: [2, 12, 17], nr: [78]))
+    @Test func disablingBothLocksDoesNotReadBeforeWriting() async throws {
+        let rpc = RadioLockRPC(cellEnabled: true, bandEnabled: true)
+        let state = try await RadioLockService(rpc: rpc).disableAll()
+        #expect(state.mode == .automatic)
         let calls = await rpc.calls
-        let disable = try #require(calls.firstIndex { $0.data["value"]["Enable"].text == "0" })
-        let enable = try #require(calls.firstIndex { $0.data["value"]["enable"].text == "1" })
-        #expect(calls[(disable + 1)..<enable].contains { $0.method == "get_value_by_xmlnode" })
-        #expect(calls[enable].method == "set_value_by_xmlnode")
-        #expect(calls[enable].data["url"].objectPairs.count == 3)
-        #expect(calls[enable].data["value"] == .strings(["enable": "1", "band4": "2,12,17", "band5": "78"]))
-        #expect(await rpc.statesAfterWrites.allSatisfy { $0 != [true, true] })
+        #expect(calls.map(\.method) == ["set_value_by_xmlnode", "set_value_by_xmlnode",
+                                           "get_value_by_xmlnode", "get_xml_childnode_value"])
+        #expect(state.lteBands == [3] && state.nrBands == [78])
     }
 
-    @Test func emptyBandsOrStandaloneB32AreRejectedBeforeAnyWrite() async {
-        for lte in [[], [32]] {
+    @Test func bandWriteNormalizesDomesticBandsThenRefreshesOnce() async throws {
+        let rpc = RadioLockRPC(cellEnabled: true)
+        let state = try await RadioLockService(rpc: rpc).setBandLockEnabled(true, lte: [8, 3, 3], nr: [79, 78])
+        #expect(state.mode == .bands(lte: [3, 8], nr: [78, 79]))
+        let calls = await rpc.calls
+        #expect(calls.map(\.method) == ["set_value_by_xmlnode", "set_value_by_xmlnode",
+                                           "get_value_by_xmlnode", "get_xml_childnode_value"])
+        #expect(calls[0].data["value"]["Enable"].text == "0")
+        #expect(calls[1].data["url"].objectPairs.count == 3)
+        #expect(calls[1].data["value"] == .strings(["enable": "1", "band4": "3,8", "band5": "78,79"]))
+    }
+
+    @Test func emptyOrUnsupportedBandsAreRejectedBeforeAnyRequest() async {
+        for lte in [[], [12]] {
             let rpc = RadioLockRPC()
             await #expect(throws: Error.self) { try await RadioLockService(rpc: rpc).setBandLockEnabled(true, lte: lte, nr: []) }
-            #expect(await rpc.statesAfterWrites.isEmpty)
+            #expect(await rpc.calls.isEmpty)
         }
+    }
+
+    @Test func standaloneDomesticB32IsSubmittedToTheFirmware() async throws {
+        let rpc = RadioLockRPC()
+        let state = try await RadioLockService(rpc: rpc).setBandLockEnabled(true, lte: [32], nr: [])
+        #expect(state.lteBands == [32])
     }
 
     @Test func addingAnLTECandidateUsesLowercaseFactoryListFields() async throws {
@@ -337,7 +384,7 @@ struct RadioLockTests {
         #expect(await full.statesAfterWrites.isEmpty)
     }
 
-    @Test func candidateUpdatesAddressTheActualChildIndexAndVerifyReadback() async throws {
+    @Test func candidateUpdatesAddressTheActualChildIndexAndRefresh() async throws {
         let rpc = RadioLockRPC()
         let state = try await RadioLockService(rpc: rpc).updateCell(index: 3, act: 1, arfcn: 1850, pci: 108)
         #expect(state.cells == [LockedCell(index: 3, act: 1, arfcn: 1850, pci: 108)])
@@ -359,43 +406,53 @@ struct RadioLockTests {
         #expect(calls[deletion].data == .object(["url": .string("X_FH_MobileNetwork.LockCellList.LockCell."), "index": .number(3)]))
     }
 
-    @Test func acceptedCandidateWriteWithUnchangedReadbackIsAnError() async {
+    @Test func acceptedCandidateWriteReturnsTheNormalRefreshWithoutVerification() async throws {
         let rpc = RadioLockRPC()
         await rpc.configure(ignoreCandidateWrite: true)
-        await #expect(throws: Error.self) { try await RadioLockService(rpc: rpc).addCell(act: 2, arfcn: 504990, pci: 524) }
+        let state = try await RadioLockService(rpc: rpc).addCell(act: 2, arfcn: 504990, pci: 524)
+        #expect(state.cells.count == 1)
     }
 
     @Test func anUnknownSwitchCannotBeTreatedAsAutomatic() async {
         let rpc = RadioLockRPC()
         await rpc.configure(invalidSwitch: true)
-        await #expect(throws: Error.self) { try await RadioLockService(rpc: rpc).setBandLockEnabled(true, lte: [3], nr: []) }
+        await #expect(throws: Error.self) { try await RadioLockService(rpc: rpc).read() }
         #expect(await rpc.statesAfterWrites.isEmpty)
     }
 
-    @Test func flightModeAndCarrierMismatchBlockEnablingAndCandidateEdits() async {
-        let airplane = RadioLockRPC()
-        await airplane.configure(airplaneEnabled: true)
-        await #expect(throws: Error.self) { try await RadioLockService(rpc: airplane).setCellLockEnabled(true) }
-        #expect(await airplane.statesAfterWrites.isEmpty)
-        let carrier = RadioLockRPC()
-        await carrier.configure(carrierLockEnabled: true, carrierSerialNumbers: "46003,46011")
-        await #expect(throws: Error.self) { try await RadioLockService(rpc: carrier).addCell(act: 2, arfcn: 504990, pci: 524) }
-        #expect(await carrier.statesAfterWrites.isEmpty)
+    @Test func nonStringBandsAreSkippedWithoutFailingThePage() async throws {
+        let rpc = RadioLockRPC()
+        await rpc.configure(bandReadOverride: .null)
+        let state = try await RadioLockService(rpc: rpc).read()
+        #expect(state.lteBands.isEmpty)
+        #expect(state.nrBands == [78])
     }
 
-    @Test func carrierPrefixMatchAllowsConfigurationWithoutExposingIMSIInState() async throws {
+    @Test func flightModeStillBlocksCandidateEdits() async {
         let rpc = RadioLockRPC()
-        await rpc.configure(carrierLockEnabled: true, carrierSerialNumbers: ",46000,46003")
-        let state = try await RadioLockService(rpc: rpc).setCellLockEnabled(true)
-        #expect(!state.carrierRestricted)
-        #expect(state.cellLockEnabled)
-    }
-
-    @Test func modemSpecificBandAndN79RulesRejectUnsupportedValues() async {
-        let rpc = RadioLockRPC()
-        await #expect(throws: Error.self) { try await RadioLockService(rpc: rpc).setBandLockEnabled(true, lte: [12], nr: []) }
-        await #expect(throws: Error.self) { try await RadioLockService(rpc: rpc).setBandLockEnabled(true, lte: [], nr: [79]) }
-        await #expect(throws: Error.self) { try await RadioLockService(rpc: rpc).addCell(act: 2, arfcn: 700000, pci: 10) }
+        await rpc.configure(airplaneEnabled: true)
+        await #expect(throws: Error.self) { try await RadioLockService(rpc: rpc).addCell(act: 2, arfcn: 504990, pci: 524) }
         #expect(await rpc.statesAfterWrites.isEmpty)
     }
+
+    @Test func readUsesStandardDomesticBandsWithoutCarrierOrModemQueries() async throws {
+        let rpc = RadioLockRPC()
+        await rpc.configure(carrierLockEnabled: true, carrierSerialNumbers: "46003", modemModel: "RG620T-NA",
+                            bandReadOverride: .string("3,, 1, junk,0,-2,3,999, "))
+        let state = try await RadioLockService(rpc: rpc).read()
+        #expect(state.lteBands == [1, 3, 999])
+        #expect(state.supportedLTEBands == [1, 3, 5, 7, 8, 20, 28, 32, 38, 40, 41, 42, 43])
+        #expect(state.supportedNRBands == [1, 3, 5, 7, 8, 20, 28, 38, 40, 41, 77, 78, 79])
+        let calls = await rpc.calls
+        #expect(calls.count == 2)
+        let paths = calls.flatMap { $0.data.objectPairs.map { $0.1.text ?? "" } }
+        #expect(!paths.contains { $0.contains("Carrier") || $0.contains("IMSI") || $0.contains("ModemModel") || $0.contains("N79_Enable") })
+    }
+
+    @Test func domesticN79CandidatesDoNotNeedADynamicCapabilityQuery() async throws {
+        let rpc = RadioLockRPC()
+        let state = try await RadioLockService(rpc: rpc).addCell(act: 2, arfcn: 700000, pci: 10)
+        #expect(state.cells.contains { $0.arfcn == 700000 && $0.pci == 10 })
+    }
+
 }

@@ -86,15 +86,6 @@ public enum UplinkTarget: String, Sendable, CaseIterable, Codable {
         }
     }
 
-    /// True when the read-back matches what this mode asked for.
-    public func isSatisfied(device: String, aggregation: Bool) -> Bool {
-        switch self {
-        case .cellular: device == Self.cellularDevice && !aggregation
-        case .ethernet: device == Self.ethernetDevice && !aggregation
-        case .aggregation: aggregation
-        case .cellularPreferred, .ethernetPreferred: false
-        }
-    }
 }
 
 public struct DeviceSettings: Sendable, Equatable {
@@ -140,6 +131,8 @@ public struct SettingsService: Sendable {
     public let rpc: any DeviceRPC
     public init(rpc: any DeviceRPC) { self.rpc = rpc }
 
+    private var nodes: FirmwareNodes { FirmwareNodes(rpc: rpc) }
+
     // MARK: Read
 
     public func read() async throws -> DeviceSettings {
@@ -157,7 +150,7 @@ public struct SettingsService: Sendable {
             wifiBatch["ssid\(index)_en"] = "WiFi.SSID.\(index).Enable"
             wifiBatch["ssid\(index)_low"] = "WiFi.SSID.\(index).LowerLayers"
         }
-        let wifiReply = try await readBatch(wifiBatch)
+        let wifiReply = try await nodes.read(wifiBatch)
         let band1 = wifiReply["r1band"].text ?? "2.4G"
         let band2 = wifiReply["r2band"].text ?? "5G"
 
@@ -179,7 +172,7 @@ public struct SettingsService: Sendable {
             for index in settings.wifi.map(\.id) {
                 secBatch["sec\(index)"] = "WiFi.AccessPoint.\(index).Security.ModeEnabled"
             }
-            let secReply = try await readBatch(secBatch)
+            let secReply = try await nodes.read(secBatch)
             for position in settings.wifi.indices {
                 let id = settings.wifi[position].id
                 if let security = secReply["sec\(id)"].text, !security.isEmpty {
@@ -189,7 +182,7 @@ public struct SettingsService: Sendable {
         }
 
         // Batch 3: Reboot schedule, LED controls, fan mode, MLO count, and uplink selection.
-        let misc = try await readBatch([
+        let misc = try await nodes.read([
             "reboot_en": "DeviceInfo.TimedReboot.1.enable",
             "reboot_time": "DeviceInfo.TimedReboot.1.time",
             "reboot_days": "DeviceInfo.TimedReboot.1.week_of_day",
@@ -217,12 +210,6 @@ public struct SettingsService: Sendable {
         return settings
     }
 
-    /// A one-alias-per-call reader. The firmware drops a whole batch on one unknown node, so
-    /// grouping several here is only safe because every path is already verified.
-    private func readBatch(_ fields: [String: String]) async throws -> JSONValue {
-        try await rpc.call("get_value_by_xmlnode", data: .strings(fields), publicAccess: false)
-    }
-
     // MARK: Write
 
     /// Writes one node with `set_single_by_xmlnode`.
@@ -232,12 +219,8 @@ public struct SettingsService: Sendable {
     /// `{"success":"true"}`. The multi-node `set_value_by_xmlnode` variant answers
     /// `ERRORSTATUS: 400` for the same node, so single writes are the supported path.
     private func write(_ path: String, _ value: String) async throws -> Bool {
-        let reply = try await rpc.call("set_single_by_xmlnode",
-                                       data: .object(["url": .string(path), "value": .string(value)]),
-                                       publicAccess: false)
-        if let success = reply["success"].text { return success == "true" }
-        let result = reply["result"].text ?? ""
-        return result == "0" || result.isEmpty
+        try await nodes.setSingle(path, value)
+        return true
     }
 
     private func writeAll(_ pairs: [(String, String)]) async throws -> Bool {
@@ -250,7 +233,7 @@ public struct SettingsService: Sendable {
     /// Enables or disables one SSID. Changes can drop associated clients, so callers must
     /// confirm with the user first.
     public func setSSIDEnabled(index: Int, enabled: Bool) async throws -> Bool {
-        try await write("WiFi.SSID.\(index).Enable", enabled ? "1" : "0")
+        try await write("WiFi.SSID.\(index).Enable", FirmwareNodes.bool(enabled))
     }
 
     /// Renames one SSID.
@@ -263,13 +246,13 @@ public struct SettingsService: Sendable {
     /// Timed reboot: `time` is `HH:mm`, `week_of_day` is `Sunday`..`Saturday` or `Everyday`.
     public func setTimedReboot(enabled: Bool, time: String, weekday: String) async throws -> Bool {
         try await writeAll([
-            ("DeviceInfo.TimedReboot.1.enable", enabled ? "1" : "0"),
+            ("DeviceInfo.TimedReboot.1.enable", FirmwareNodes.bool(enabled)),
             ("DeviceInfo.TimedReboot.1.time", time),
             ("DeviceInfo.TimedReboot.1.week_of_day", weekday)
         ])
     }
 
-    /// Switches the uplink mode and verifies it by reading the device back.
+    /// Switches the uplink mode using the firmware write acknowledgements.
     ///
     /// Switching can briefly drop the LAN/Wi-Fi path this app is connected through, so the
     /// caller must be prepared for the call to throw even when the write landed.
@@ -278,30 +261,30 @@ public struct SettingsService: Sendable {
         for step in target.writes() {
             guard try await write(step.path, step.value) else { return false }
         }
-        let reply = try await readBatch([
-            "device": UplinkTarget.deviceNode,
-            "aggregation": UplinkTarget.aggregationNode
-        ])
-        return target.isSatisfied(device: reply["device"].text ?? "",
-                                  aggregation: reply["aggregation"].text == "1")
+        return true
     }
 
     /// The LED master switch.
     public func setLEDEnabled(_ enabled: Bool) async throws -> Bool {
-        try await write("DeviceInfo.X_FH_LedControl.Switch", enabled ? "1" : "0")
+        try await write("DeviceInfo.X_FH_LedControl.Switch", FirmwareNodes.bool(enabled))
     }
 
     public static let fanNode = "X_FH_MobileNetwork.FanAutoConfig.mode"
 
-    /// Sets `FanAutoConfig.mode` and confirms it by reading the node back.
+    /// Sets `FanAutoConfig.mode` using the firmware write acknowledgement.
     public func setFanMode(_ mode: FanMode) async throws -> Bool {
-        let acknowledgement = try await rpc.call("set_value_by_xmlnode", data: .object([
-            "url": .strings(["mode": Self.fanNode]),
-            "value": .strings(["mode": mode.rawValue])
-        ]), publicAccess: false)
-        try FirmwareNodes(rpc: rpc).ensureWrite(acknowledgement)
-        let reply = try await readBatch(["mode": Self.fanNode])
-        guard reply["mode"].text == mode.rawValue else { throw CPEError.uncertain }
+        try await nodes.setMulti(urls: ["mode": Self.fanNode], values: ["mode": mode.rawValue])
         return true
     }
+
+    /// Immediate reboot action from the LG6851F reference client, `router_api.reboot_device`:
+    /// https://github.com/0dayfa/FiberHome-Manager/blob/main/router_api.py#L514-L516
+    /// Its `_post_api` omits the empty data argument. Recovery belongs to the caller;
+    /// this action is sent once and never followed by a settings read.
+    @discardableResult
+    public func rebootNow() async throws -> Bool {
+        try await nodes.write("device_reboot", data: .null)
+        return true
+    }
+
 }

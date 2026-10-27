@@ -40,17 +40,13 @@ struct UplinkTargetTests {
         ])
     }
 
-    @Test func readBackDecidesSuccess() {
-        #expect(UplinkTarget.cellular.isSatisfied(
-            device: "InternetGatewayDevice.WANDevice.1.", aggregation: false))
-        #expect(UplinkTarget.cellular.isSatisfied(
-            device: "InternetGatewayDevice.WANDevice.2.", aggregation: false) == false)
-        #expect(UplinkTarget.ethernet.isSatisfied(
-            device: "InternetGatewayDevice.WANDevice.2.", aggregation: false))
-        #expect(UplinkTarget.aggregation.isSatisfied(
-            device: "InternetGatewayDevice.WANDevice.1.", aggregation: true))
-        #expect(UplinkTarget.aggregation.isSatisfied(
-            device: "InternetGatewayDevice.WANDevice.1.", aggregation: false) == false)
+    @Test func successfulReceiptsDoNotNeedAMatchingReadback() async throws {
+        for target in [UplinkTarget.cellular, .ethernet, .aggregation] {
+            let rpc = RecordingRPC()
+            #expect(try await SettingsService(rpc: rpc).setUplink(target))
+            #expect(rpc.calls.count == target.writes().count)
+            #expect(rpc.calls.allSatisfy { $0.method == "set_single_by_xmlnode" })
+        }
     }
 
     @Test func activeModeIsDerivedFromTheDevice() {

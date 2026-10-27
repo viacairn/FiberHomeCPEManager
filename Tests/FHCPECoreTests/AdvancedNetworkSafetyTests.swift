@@ -51,7 +51,6 @@ private actor AdvancedRPC: DeviceRPC {
 
 private let advancedWAN = WANConnectionRef(device: 1, link: .ipoe, name: "1_INTERNET_R_VID_", enabled: true)
 private let acknowledged = JSONValue.object(["success": .bool(true)])
-private let validLAN = JSONValue.strings(["router": "192.168.8.1", "mask": "255.255.255.0"])
 
 private func discoveryTree(device: Int = 1, connection: Int = 1, service: Int = 1,
                            enabled: JSONValue = .string("1"), link: String = "ipoe") -> JSONValue {
@@ -179,28 +178,43 @@ private func mappingRow(_ changes: [String: JSONValue] = [:]) -> JSONValue {
         #expect(await rpc.requests.filter { $0.method == "set_value_by_xmlnode" }.count == 1)
     }
 
-    @Test func unmatchedMobileReadBackPollsWithoutRepeatingWrite() async {
+    @Test func unmatchedMobileRefreshDoesNotOverrideSuccessfulReceipt() async throws {
         let read = [AdvancedRPC.Step("get_value_by_xmlnode", .strings([
             "airplane": "0", "antenna": "1", "antennaType": "2", "carrier": "0"
         ]))] + discoverySteps() + [.init("get_value_by_xmlnode", .strings(["enable": "1"]))]
-        let rpc = AdvancedRPC([.init("set_single_by_xmlnode", acknowledged)] + Array(repeating: read, count: 5).flatMap { $0 })
-        await #expect(throws: CPEError.uncertain) { _ = try await MobileNetworkService(rpc: rpc).setAirplaneMode(true) }
+        let rpc = AdvancedRPC([.init("set_single_by_xmlnode", acknowledged)] + read)
+        let state = try await MobileNetworkService(rpc: rpc).setAirplaneMode(true)
+        #expect(state.airplaneMode)
         #expect(await rpc.requests.filter { $0.method == "set_single_by_xmlnode" }.count == 1)
+
+        let dataRPC = AdvancedRPC([
+            .init("get_value_by_xmlnode", .strings(["airplane": "0"]))
+        ] + discoverySteps() + [.init("set_single_by_xmlnode", acknowledged)] + read)
+        let dataState = try await MobileNetworkService(rpc: dataRPC).setCellularData(false)
+        #expect(!dataState.cellularDataEnabled)
+        #expect(dataState.antennaType == .n78n77)
+
+        let antennaRPC = AdvancedRPC([.init("set_value_by_xmlnode", acknowledged)] + read)
+        let antennaState = try await MobileNetworkService(rpc: antennaRPC).setAntenna(enabled: true, type: .n41)
+        #expect(antennaState.antennaEnabled)
+        #expect(antennaState.antennaType == .n41)
     }
 
     @Test(arguments: ["child_node_idx", "enabled", "user", "password"])
-    func ddnsReadRejectsMissingFields(_ field: String) async {
+    func ddnsReadSkipsMissingFieldsAndRetainsOtherRows(_ field: String) async throws {
         let rpc = AdvancedRPC(discoverySteps() + [
-            .init("get_xml_childnode_value", .object(["data": .array([ddnsRow([field: .null])])]))
+            .init("get_xml_childnode_value", .object(["data": .array([ddnsRow([field: .null]), ddnsRow(["child_node_idx": .string("4")])])]))
         ])
-        await #expect(throws: CPEError.malformedResponse) { _ = try await DDNSService(rpc: rpc).read() }
+        #expect(try await DDNSService(rpc: rpc).read().map(\.index) == [4])
     }
 
-    @Test func ddnsReadRejectsDuplicateIndices() async {
+    @Test func ddnsReadSkipsDuplicateIndices() async throws {
         let rpc = AdvancedRPC(discoverySteps() + [
-            .init("get_xml_childnode_value", .object(["data": .array([ddnsRow(), ddnsRow()])]))
+            .init("get_xml_childnode_value", .object(["data": .array([ddnsRow(), ddnsRow(["host": .string("duplicate.example.invalid")])])]))
         ])
-        await #expect(throws: CPEError.malformedResponse) { _ = try await DDNSService(rpc: rpc).read() }
+        let entries = try await DDNSService(rpc: rpc).read()
+        #expect(entries.count == 1)
+        #expect(entries.first?.hostname == "router.example.invalid")
     }
 
     @Test func ddnsKnownEmptyFieldsRemainDistinctFromMissingFields() async throws {
@@ -216,7 +230,7 @@ private func mappingRow(_ changes: [String: JSONValue] = [:]) -> JSONValue {
         #expect(entries.first?.password == "")
     }
 
-    @Test func ddnsUpdateRequiresEveryWrittenFieldToMatch() async {
+    @Test func ddnsUpdateReturnsOneNormalRefreshWithoutComparingWrittenFields() async throws {
         let entry = DDNSEntry(wan: advancedWAN, index: 3, provider: "dyndns", hostname: "router.example.invalid",
                               username: "fixture-user", password: "fixture-password", enabled: true)
         let input = DDNSInput(wan: advancedWAN, provider: "No-IP.com", hostname: "router.example.invalid",
@@ -224,7 +238,10 @@ private func mappingRow(_ changes: [String: JSONValue] = [:]) -> JSONValue {
         let rpc = AdvancedRPC([.init("set_value_by_xmlnode", acknowledged)] + discoverySteps() + [
             .init("get_xml_childnode_value", .object(["data": .array([ddnsRow()])]))
         ])
-        await #expect(throws: CPEError.uncertain) { _ = try await DDNSService(rpc: rpc).update(entry, with: input) }
+        let refreshed = try await DDNSService(rpc: rpc).update(entry, with: input)
+        #expect(refreshed.first?.provider == "dyndns")
+        #expect(refreshed.first?.enabled == true)
+        #expect(await rpc.requests.count == 3)
         #expect(await rpc.requests.filter { $0.method == "set_value_by_xmlnode" }.count == 1)
     }
 
@@ -239,81 +256,91 @@ private func mappingRow(_ changes: [String: JSONValue] = [:]) -> JSONValue {
     }
 
     @Test(arguments: ["child_node_idx", "enabled", "internalEnd", "externalEnd", "protocol"])
-    func mappingReadRejectsMissingFields(_ field: String) async {
+    func mappingReadSkipsMissingFieldsAndRetainsOtherRows(_ field: String) async throws {
         let rpc = AdvancedRPC(discoverySteps() + [
-            .init("get_xml_childnode_value", .object(["data": .array([mappingRow([field: .null])])]))
+            .init("get_xml_childnode_value", .object(["data": .array([mappingRow([field: .null]), mappingRow(["child_node_idx": .string("4")])])]))
         ])
-        await #expect(throws: CPEError.malformedResponse) { _ = try await PortMappingService(rpc: rpc).read() }
+        #expect(try await PortMappingService(rpc: rpc).read().map(\.index) == [4])
     }
 
-    @Test func mappingReadRejectsUnknownProtocol() async {
+    @Test func mappingReadSkipsUnknownProtocolAndRetainsOtherRows() async throws {
         let rpc = AdvancedRPC(discoverySteps() + [
-            .init("get_xml_childnode_value", .object(["data": .array([mappingRow(["protocol": .string("SCTP")])])]))
+            .init("get_xml_childnode_value", .object(["data": .array([mappingRow(["protocol": .string("SCTP")]), mappingRow(["child_node_idx": .string("4")])])]))
         ])
-        await #expect(throws: CPEError.malformedResponse) { _ = try await PortMappingService(rpc: rpc).read() }
+        #expect(try await PortMappingService(rpc: rpc).read().map(\.index) == [4])
     }
 
-    @Test func mappingAddRequiresAllPortsToMatchIndependentReadBack() async {
+    @Test func mappingAddReturnsOneNormalRefreshWithoutComparingWrittenFields() async throws {
         let input = PortMappingInput(wan: advancedWAN, localIP: "192.168.8.120", internalPort: 8080,
                                      internalEnd: 8080, externalPort: 18081, externalEnd: 18081, proto: .tcp, enabled: true)
-        let rpc = AdvancedRPC([.init("get_value_by_xmlnode", validLAN)] + discoverySteps() + [
+        let rpc = AdvancedRPC([
             .init("get_xml_childnode_value", .object(["data": .array([])])),
             .init("add_xmlnode", .strings(["portMap": "3"])),
             .init("set_value_by_xmlnode", acknowledged)
         ] + discoverySteps() + [.init("get_xml_childnode_value", .object(["data": .array([mappingRow()])]))])
-        await #expect(throws: CPEError.uncertain) { _ = try await PortMappingService(rpc: rpc).add(input) }
-        #expect(await rpc.requests.filter { $0.method == "add_xmlnode" }.count == 1)
+        let refreshed = try await PortMappingService(rpc: rpc).add(input)
+        #expect(refreshed.first?.externalPort == 18080)
+        #expect(await rpc.requests.count == 5)
         #expect(await rpc.requests.filter { $0.method == "set_value_by_xmlnode" }.count == 1)
     }
 
     @Test(arguments: ["192.168.8.1", "192.168.9.20", "192.168.8.0", "192.168.8.255"])
-    func mappingRejectsGatewayAndAddressesOutsideUsableLAN(_ address: String) async {
+    func mappingDelegatesSubnetDecisionsToFirmware(_ address: String) async throws {
         let input = PortMappingInput(wan: advancedWAN, localIP: address, internalPort: 8080,
                                      internalEnd: 8080, externalPort: 18080, externalEnd: 18080, proto: .tcp, enabled: false)
-        let rpc = AdvancedRPC([.init("get_value_by_xmlnode", validLAN)])
-        await #expect(throws: CPEError.unsupported("映射目标必须是当前 LAN 子网内的主机地址，且不能使用路由器地址。")) {
-            _ = try await PortMappingService(rpc: rpc).add(input)
-        }
-        #expect(await rpc.requests.count == 1)
+        let rpc = AdvancedRPC([
+            .init("get_xml_childnode_value", .object(["data": .array([])])),
+            .init("add_xmlnode", .strings(["portMap": "3"])),
+            .init("set_value_by_xmlnode", acknowledged)
+        ] + discoverySteps() + [.init("get_xml_childnode_value", .object(["data": .array([mappingRow(["localIP": .string(address)])])]))])
+        _ = try await PortMappingService(rpc: rpc).add(input)
+        #expect(await rpc.requests.count == 5)
+        #expect(await rpc.requests.allSatisfy { $0.method != "get_value_by_xmlnode" })
     }
 
-    @Test(arguments: [(18070, 18080), (18090, 18100), (18070, 18100), (18081, 18082)])
-    func mappingRejectsAllExternalRangeOverlapIncludingDisabledOtherProtocol(_ range: (Int, Int)) async {
-        let input = PortMappingInput(wan: advancedWAN, localIP: "192.168.8.120", internalPort: 8080,
-                                     internalEnd: 8080, externalPort: range.0, externalEnd: range.1, proto: .tcp, enabled: false)
-        let rpc = AdvancedRPC([.init("get_value_by_xmlnode", validLAN)] + discoverySteps() + [
-            .init("get_xml_childnode_value", .object(["data": .array([
-                mappingRow(["externalEnd": .string("18090"), "protocol": .string("UDP"), "enabled": .string("0")])
-            ])]))
-        ])
-        await #expect(throws: CPEError.unsupported("外部端口范围与此 WAN 上的现有映射重叠。")) {
-            _ = try await PortMappingService(rpc: rpc).add(input)
-        }
-        #expect(await rpc.requests.allSatisfy { $0.method == "get_value_by_xmlnode" || $0.method == "get_xml_childnode_value" })
-    }
-
-    @Test func mappingOverlapIncludesOtherServicesOnSameWANDevice() async {
-        let tree = JSONValue.object(["data": .array([.object([
-            "child_node_idx": .number(1), "wanenable": .string("1"),
-            "wanconnection": .array([.object([
-                "child_node_idx": .number(1), "pppoe": .array([]),
-                "ipoe": .array([
-                    .object(["child_node_idx": .number(1), "Name": .string("1_INTERNET_R_VID_"), "Enable": .string("1")]),
-                    .object(["child_node_idx": .number(2), "Name": .string("2_TR069_R_VID_"), "Enable": .string("1")])
-                ])
-            ])])
-        ])])])
+    @Test func mappingOnlyReadsTheSelectedTableBeforeAdding() async throws {
         let input = PortMappingInput(wan: advancedWAN, localIP: "192.168.8.120", internalPort: 8080,
                                      internalEnd: 8080, externalPort: 18080, externalEnd: 18080, proto: .tcp, enabled: false)
         let rpc = AdvancedRPC([
-            .init("get_value_by_xmlnode", validLAN), .init("get_xml_childnode_value", tree),
-            .init("get_xml_childnode_value", .object(["data": .array([])])),
+            .init("get_xml_childnode_value", .object(["data": .array([mappingRow()])])),
+            .init("add_xmlnode", .strings(["portMap": "4"])),
+            .init("set_value_by_xmlnode", acknowledged)
+        ] + discoverySteps() + [.init("get_xml_childnode_value", .object(["data": .array([mappingRow()])]))])
+        _ = try await PortMappingService(rpc: rpc).add(input)
+        let firstRequest = try #require(await rpc.requests.first)
+        #expect(firstRequest.data["url"].text == "InternetGatewayDevice.WANDevice.1.WANConnectionDevice.1.WANIPConnection.1.PortMapping.")
+        #expect(await rpc.requests.count == 5)
+    }
+
+    @Test func mappingUpdateWritesTheExistingIndexAndRefreshesOnce() async throws {
+        let entry = PortMappingEntry(wan: advancedWAN, index: 3, localIP: "192.168.8.120", internalPort: 8080,
+                                     internalEnd: 8080, externalPort: 18080, externalEnd: 18080, proto: .tcp, enabled: true)
+        let input = PortMappingInput(wan: advancedWAN, localIP: "192.168.8.121", internalPort: 9090,
+                                     internalEnd: 9090, externalPort: 19090, externalEnd: 19090, proto: .udp, enabled: false)
+        let rpc = AdvancedRPC([.init("set_value_by_xmlnode", acknowledged)] + discoverySteps() + [
+            .init("get_xml_childnode_value", .object(["data": .array([mappingRow([
+                "localIP": .string("192.168.8.121"), "internalPort": .string("9090"), "internalEnd": .string("9090"),
+                "externalPort": .string("19090"), "externalEnd": .string("19090"), "protocol": .string("UDP"), "enabled": .string("0")
+            ])])]))
+        ])
+        let refreshed = try await PortMappingService(rpc: rpc).update(entry, with: input)
+        #expect(refreshed.first?.localIP == "192.168.8.121")
+        #expect(refreshed.first?.externalPort == 19090)
+        let write = try #require(await rpc.requests.first)
+        #expect(write.data["url"]["node1"].text == "InternetGatewayDevice.WANDevice.1.WANConnectionDevice.1.WANIPConnection.1.PortMapping.3.InternalClient")
+        #expect(write.data["value"]["node1"].text == "192.168.8.121")
+        #expect(await rpc.requests.count == 3)
+    }
+
+    @Test func mappingDeleteReturnsOneRefreshedListWithoutAComparison() async throws {
+        let entry = PortMappingEntry(wan: advancedWAN, index: 3, localIP: "192.168.8.120", internalPort: 8080,
+                                     internalEnd: 8080, externalPort: 18080, externalEnd: 18080, proto: .tcp, enabled: true)
+        let rpc = AdvancedRPC([.init("del_xmlnode", acknowledged)] + discoverySteps() + [
             .init("get_xml_childnode_value", .object(["data": .array([mappingRow()])]))
         ])
-        await #expect(throws: CPEError.unsupported("外部端口范围与此 WAN 上的现有映射重叠。")) {
-            _ = try await PortMappingService(rpc: rpc).add(input)
-        }
-        #expect(await rpc.requests.count == 4)
+        let refreshed = try await PortMappingService(rpc: rpc).delete(entry)
+        #expect(refreshed.first?.index == 3)
+        #expect(await rpc.requests.count == 3)
     }
 
     @Test func cellularWriteIsBlockedWhileAirplaneModeIsOn() async {
@@ -324,47 +351,28 @@ private func mappingRow(_ changes: [String: JSONValue] = [:]) -> JSONValue {
         #expect(await rpc.requests.count == 1)
     }
 
-    @Test func cellularWriteIsBlockedForRestrictedCarrier() async {
+    @Test func mobileStateReadsWithoutCarrierLockNodes() async throws {
         let rpc = AdvancedRPC([
-            .init("get_value_by_xmlnode", .strings(["airplane": "0", "carrier": "1"])),
-            .init("get_value_by_xmlnode", .strings(["serials": "00101", "imsi": "999991234567890"]))
-        ])
-        await #expect(throws: CPEError.unsupported("当前 SIM 卡不符合运营商限制，无法更改蜂窝数据。")) {
-            _ = try await MobileNetworkService(rpc: rpc).setCellularData(true)
-        }
-        #expect(await rpc.requests.count == 2)
-    }
-
-    @Test func cellularWriteRejectsUnknownCarrierLockState() async {
-        let rpc = AdvancedRPC([.init("get_value_by_xmlnode", .strings(["airplane": "0"]))])
-        await #expect(throws: CPEError.malformedResponse) {
-            _ = try await MobileNetworkService(rpc: rpc).setCellularData(true)
-        }
-        #expect(await rpc.requests.count == 1)
-    }
-
-    @Test(arguments: [("001021234567890", false), ("999991234567890", true)])
-    func mobileStateUsesAllowedCarrierPrefixes(_ value: (String, Bool)) async throws {
-        let rpc = AdvancedRPC([
-            .init("get_value_by_xmlnode", .strings(["airplane": "0", "antenna": "1", "antennaType": "2", "carrier": "1"])),
-            .init("get_value_by_xmlnode", .strings(["serials": "00101,00102", "imsi": value.0]))
+            .init("get_value_by_xmlnode", .strings(["airplane": "0", "antenna": "1", "antennaType": "2"]))
         ] + discoverySteps() + [.init("get_value_by_xmlnode", .strings(["enable": "1"]))])
         let state = try await MobileNetworkService(rpc: rpc).read()
-        #expect(state.carrierRestricted == value.1)
-        #expect(state.cellularBlocked == value.1)
+        #expect(!state.cellularBlocked)
+        let request = try #require(await rpc.requests.first)
+        #expect(request.data["carrier"] == .null)
+        #expect(await rpc.requests.count == 3)
     }
 
-    @Test func mappingLimitUsesStableWANIdentityWhenEnableStateChanges() async {
+    @Test func mappingCapacityLimitReadsOnlyTheSelectedWANTable() async {
         let rows = (1...8).map { mappingRow(["child_node_idx": .string(String($0))]) }
         let input = PortMappingInput(wan: advancedWAN, localIP: "192.168.8.120", internalPort: 8080,
                                      internalEnd: 8080, externalPort: 28080, externalEnd: 28080, proto: .tcp, enabled: false)
-        let rpc = AdvancedRPC([.init("get_value_by_xmlnode", validLAN)] + discoverySteps(enabled: "0") + [
+        let rpc = AdvancedRPC([
             .init("get_xml_childnode_value", .object(["data": .array(rows)]))
         ])
         await #expect(throws: CPEError.unsupported("每个 WAN 最多可添加 8 条端口映射。")) {
             _ = try await PortMappingService(rpc: rpc).add(input)
         }
-        #expect(await rpc.requests.count == 3)
+        #expect(await rpc.requests.count == 1)
     }
 
     @Test(arguments: ["provider", "hostname", "username", "password"])
@@ -385,7 +393,7 @@ private func mappingRow(_ changes: [String: JSONValue] = [:]) -> JSONValue {
         let rows = (1...4).map { ddnsRow(["child_node_idx": .string(String($0))]) }
         let input = DDNSInput(wan: advancedWAN, provider: "dyndns", hostname: "other.example.invalid",
                               username: "fixture-user", password: "fixture-password", enabled: false)
-        let rpc = AdvancedRPC(discoverySteps() + [
+        let rpc = AdvancedRPC([
             .init("get_xml_childnode_value", .object(["data": .array(rows)]))
         ])
         await #expect(throws: CPEError.unsupported("每个 WAN 最多可添加 4 条 DDNS 配置。")) {

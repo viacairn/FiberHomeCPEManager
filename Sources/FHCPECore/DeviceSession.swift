@@ -21,7 +21,6 @@ public actor DeviceSession {
     private lazy var mobileNetwork = MobileNetworkService(rpc: transport)
     private lazy var ddnsService = DDNSService(rpc: transport)
     private lazy var portMappingService = PortMappingService(rpc: transport)
-    private var refreshing = false
     private var lastHeartbeatAt: TimeInterval?
     private var supportsHeartbeat = true
     private var receiveCounter = TrafficCounter()
@@ -33,12 +32,10 @@ public actor DeviceSession {
     public func connect(username: String, password: String) async throws -> SessionReading {
         _ = try await adapter.identify()
         try await adapter.login(username: username, password: password)
+        lastHeartbeatAt = nil
         return try await sample()
     }
     public func refresh() async throws -> SessionReading {
-        guard !refreshing else { throw CPEError.busy }
-        refreshing = true
-        defer { refreshing = false }
         return try await sample()
     }
     /// Reads the snapshot and derives bit-per-second rates from byte-counter deltas.
@@ -109,6 +106,10 @@ public actor DeviceSession {
         try await SettingsService(rpc: transport).renameSSID(index: index, ssid: ssid)
     }
 
+    public func rebootDevice() async throws {
+        guard try await SettingsService(rpc: transport).rebootNow() else { throw CPEError.rejected }
+    }
+
     public func setTimedReboot(enabled: Bool, time: String, weekday: String) async throws -> Bool {
         try await SettingsService(rpc: transport).setTimedReboot(enabled: enabled, time: time, weekday: weekday)
     }
@@ -127,6 +128,9 @@ public actor DeviceSession {
     }
 
     public func readRadioLocks() async throws -> RadioLockState { try await radioLocks.read() }
+    public func lockCell(_ cell: LockedCell) async throws -> RadioLockState {
+        try await radioLocks.lockCell(act: cell.act, arfcn: cell.arfcn, pci: cell.pci)
+    }
     public func setCellLockEnabled(_ enabled: Bool) async throws -> RadioLockState {
         try await radioLocks.setCellLockEnabled(enabled)
     }
@@ -143,8 +147,14 @@ public actor DeviceSession {
     public func deleteLockedCell(_ cell: LockedCell) async throws -> RadioLockState {
         try await radioLocks.deleteCell(index: cell.index)
     }
-    public func reserveIP(mac: String, ip: String) async throws {
-        _ = try await DHCPReservationService(rpc: transport).reserve(mac: mac, ip: ip)
+    public func reserveIP(mac: String, ip: String) async throws -> [DHCPReservation] {
+        try await DHCPReservationService(rpc: transport).reserve(mac: mac, ip: ip)
+    }
+    public func readReservations() async throws -> [DHCPReservation] {
+        try await DHCPReservationService(rpc: transport).read()
+    }
+    public func removeReservation(_ reservation: DHCPReservation) async throws -> [DHCPReservation] {
+        try await DHCPReservationService(rpc: transport).remove(reservation)
     }
 
     public func readMobileNetwork() async throws -> MobileNetworkState { try await mobileNetwork.read() }
@@ -159,18 +169,21 @@ public actor DeviceSession {
         try await mobileNetwork.setAntenna(enabled: enabled, type: type)
     }
     public func readDDNS() async throws -> [DDNSEntry] { try await ddnsService.read() }
-    public func addDDNS(_ input: DDNSInput) async throws -> DDNSEntry { try await ddnsService.add(input) }
-    public func updateDDNS(_ entry: DDNSEntry, with input: DDNSInput) async throws -> DDNSEntry {
+    public func addDDNS(_ input: DDNSInput) async throws -> [DDNSEntry] { try await ddnsService.add(input) }
+    public func updateDDNS(_ entry: DDNSEntry, with input: DDNSInput) async throws -> [DDNSEntry] {
         try await ddnsService.update(entry, with: input)
     }
-    public func deleteDDNS(_ entry: DDNSEntry) async throws { try await ddnsService.delete(entry) }
-    public func setDDNSEnabled(_ entry: DDNSEntry, _ enabled: Bool) async throws -> DDNSEntry {
+    public func deleteDDNS(_ entry: DDNSEntry) async throws -> [DDNSEntry] { try await ddnsService.delete(entry) }
+    public func setDDNSEnabled(_ entry: DDNSEntry, _ enabled: Bool) async throws -> [DDNSEntry] {
         try await ddnsService.setEnabled(entry, enabled)
     }
     public func readPortMappings() async throws -> [PortMappingEntry] { try await portMappingService.read() }
-    public func addPortMapping(_ input: PortMappingInput) async throws -> PortMappingEntry { try await portMappingService.add(input) }
-    public func deletePortMapping(_ entry: PortMappingEntry) async throws { try await portMappingService.delete(entry) }
-    public func setPortMappingEnabled(_ entry: PortMappingEntry, _ enabled: Bool) async throws -> PortMappingEntry {
+    public func addPortMapping(_ input: PortMappingInput) async throws -> [PortMappingEntry] { try await portMappingService.add(input) }
+    public func updatePortMapping(_ entry: PortMappingEntry, with input: PortMappingInput) async throws -> [PortMappingEntry] {
+        try await portMappingService.update(entry, with: input)
+    }
+    public func deletePortMapping(_ entry: PortMappingEntry) async throws -> [PortMappingEntry] { try await portMappingService.delete(entry) }
+    public func setPortMappingEnabled(_ entry: PortMappingEntry, _ enabled: Bool) async throws -> [PortMappingEntry] {
         try await portMappingService.setEnabled(entry, enabled)
     }
 

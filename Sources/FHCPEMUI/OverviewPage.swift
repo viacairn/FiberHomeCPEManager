@@ -455,18 +455,15 @@ public struct PageData: Sendable, Equatable {
         guard isLive, let snapshot else { return nil }
         if let text = snapshot.uptime, !text.isEmpty {
             guard let seconds = Double(text) else { return text }
-            return Self.duration(seconds)
+            return Self.uptimeDuration(seconds)
         }
         guard let seconds = snapshot.wanUptime, seconds > 0 else { return nil }
-        return Self.duration(seconds)
+        return Self.uptimeDuration(seconds)
     }
 
-    static func duration(_ seconds: Double) -> String {
-        let total = max(0, Int(seconds))
-        let days = total / 86_400, hours = (total % 86_400) / 3_600, minutes = (total % 3_600) / 60
-        if days > 0 { return "\(days) 天 \(hours) 小时" }
-        if hours > 0 { return "\(hours) 小时 \(minutes) 分" }
-        return "\(minutes) 分钟"
+    private static func uptimeDuration(_ seconds: Double) -> String? {
+        guard let text = MetricFormatter.formatDuration(seconds) else { return nil }
+        return text.hasSuffix(" 分") && !text.contains(" 小时") ? text + "钟" : text
     }
     /// Message count reported by the device (bodies may be unreadable).
     public var smsCount: Int? { isLive ? snapshot?.smsCount : nil }

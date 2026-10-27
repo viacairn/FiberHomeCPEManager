@@ -77,6 +77,21 @@ struct EndToEndTests {
             await session.close()
         }
     }
+
+    @Test func expiredSessionCanReauthenticateAndResumeReads() async throws {
+        try await withServer { server, port in
+            let session = DeviceSession(address: try DeviceAddress("http://127.0.0.1:\(port)"))
+            _ = try await session.connect(username: "admin", password: "test-password")
+            server.expireSession()
+            await #expect(throws: CPEError.authentication) { _ = try await session.refresh() }
+            let renewed = try await session.connect(username: "admin", password: "test-password")
+            #expect(renewed.snapshot.model == "LG6851F")
+            #expect(!renewed.devices.isEmpty)
+            _ = try await session.threads()
+            #expect(server.log.filter { $0 == "HEARTBEAT" }.count == 2)
+            await session.close()
+        }
+    }
     private func withServer<T>(_ body: (FakeCPE, UInt16) async throws -> T) async throws -> T {
         let server = try FakeCPE()
         let port = try server.start()

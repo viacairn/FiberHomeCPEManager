@@ -164,22 +164,21 @@ private func cellularWANValues(device: Int = 1) -> [String: String] {
     var input = DDNSInput(wan: wan, provider: "dyndns", hostname: "home.example.com",
                           username: "admin", password: "secret", enabled: true)
     #expect(input.validationError == nil)
-    let added = try await service.add(input)
+    let added = try #require(try await service.add(input).first)
     #expect(added.index == 1)
     #expect(added.hostname == "home.example.com")
     #expect(added.enabled)
 
     input.hostname = "new.example.com"
     input.enabled = false
-    let updated = try await service.update(added, with: input)
+    let updated = try #require(try await service.update(added, with: input).first)
     #expect(updated.hostname == "new.example.com")
     #expect(!updated.enabled)
 
-    let enabled = try await service.setEnabled(updated, true)
+    let enabled = try #require(try await service.setEnabled(updated, true).first)
     #expect(enabled.enabled)
 
-    try await service.delete(enabled)
-    #expect(try await service.read().isEmpty)
+    #expect(try await service.delete(enabled).isEmpty)
 }
 
 @Test func ddnsRejectsIncompleteInputBeforeWriting() async throws {
@@ -200,16 +199,15 @@ private func cellularWANValues(device: Int = 1) -> [String: String] {
                                  externalPort: 18080, externalEnd: 18080,
                                  proto: .tcp, enabled: true)
     #expect(input.validationError == nil)
-    let added = try await service.add(input)
+    let added = try #require(try await service.add(input).first)
     #expect(added.index == 1)
     #expect(added.localIP == "192.168.8.120")
     #expect(added.internalRange == "8080")
 
-    let disabled = try await service.setEnabled(added, false)
+    let disabled = try #require(try await service.setEnabled(added, false).first)
     #expect(!disabled.enabled)
 
-    try await service.delete(disabled)
-    #expect(try await service.read().isEmpty)
+    #expect(try await service.delete(disabled).isEmpty)
 }
 
 @Test func portMappingValidationRejectsBadAddressAndRange() {

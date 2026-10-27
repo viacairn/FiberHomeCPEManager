@@ -48,23 +48,15 @@ struct DHCPReservationTests {
         #expect(calls[0].publicAccess == false)
     }
 
-    @Test func addsAReservationUsingTheStockPayloadAndVerifiesReadBack() async throws {
-        let rpc = DHCPReservationRPC(replies: [configuration(), table(), .strings(["success": "true"]),
+    @Test func addsAReservationUsingTheStockPayloadAndRefreshesOnce() async throws {
+        let rpc = DHCPReservationRPC(replies: [table(), .strings(["success": "true"]),
                                               table(index: "9", ip: "192.168.8.120")])
-        let saved = try await DHCPReservationService(rpc: rpc).reserve(mac: "02-aa-bb-cc-dd-ee", ip: "192.168.8.120")
-        #expect(saved.index == 9)
-        #expect(saved.ip == "192.168.8.120")
+        let refreshed = try await DHCPReservationService(rpc: rpc).reserve(mac: "02-aa-bb-cc-dd-ee", ip: "192.168.8.120")
+        #expect(refreshed.first?.index == 9)
+        #expect(refreshed.first?.ip == "192.168.8.120")
         let calls = await rpc.calls
-        #expect(calls.map(\.method) == ["get_value_by_xmlnode", "get_xml_childnode_value",
-                                      "add_set_xmlnode", "get_xml_childnode_value"])
-        #expect(calls[0].data == .strings([
-            "enabled": "LANDevice.1.LANHostConfigManagement.DHCPServerEnable",
-            "router": "LANDevice.1.LANHostConfigManagement.IPInterface.1.IPInterfaceIPAddress",
-            "mask": "LANDevice.1.LANHostConfigManagement.IPInterface.1.IPInterfaceSubnetMask",
-            "min": "LANDevice.1.LANHostConfigManagement.MinAddress",
-            "max": "LANDevice.1.LANHostConfigManagement.MaxAddress"
-        ]))
-        #expect(calls[2].data == .object([
+        #expect(calls.map(\.method) == ["get_xml_childnode_value", "add_set_xmlnode", "get_xml_childnode_value"])
+        #expect(calls[1].data == .object([
             "url": .string("LANDevice.1.LANHostConfigManagement.X_FH_StaticDhcp."),
             "setNode": .object([
                 "url": .strings(["MAC": "MACAddress", "IP": "IPAddress"]),
@@ -74,60 +66,32 @@ struct DHCPReservationTests {
         #expect(calls.allSatisfy { !$0.publicAccess })
     }
 
-    @Test func editsTheMatchingMACUsingItsReturnedInstanceInsteadOfAddingADuplicate() async throws {
-        let rpc = DHCPReservationRPC(replies: [configuration(), table(index: "17", ip: "192.168.8.110"),
+    @Test func editsTheMatchingMACInsteadOfAddingADuplicate() async throws {
+        let rpc = DHCPReservationRPC(replies: [table(index: "17", ip: "192.168.8.110"),
                                               .strings(["result": "0"]), table(index: "17", ip: "192.168.8.120")])
         _ = try await DHCPReservationService(rpc: rpc).reserve(mac: "02:AA:BB:CC:DD:EE", ip: "192.168.8.120")
         let calls = await rpc.calls
-        #expect(calls[2].method == "set_value_by_xmlnode")
-        #expect(calls[2].data == .object([
+        #expect(calls.map(\.method) == ["get_xml_childnode_value", "set_value_by_xmlnode", "get_xml_childnode_value"])
+        #expect(calls[1].data == .object([
             "url": .strings([
-                "MAC": "LANDevice.1.LANHostConfigManagement.X_FH_StaticDhcp.17.MACAddress",
-                "IP": "LANDevice.1.LANHostConfigManagement.X_FH_StaticDhcp.17.IPAddress"
+                "node0": "LANDevice.1.LANHostConfigManagement.X_FH_StaticDhcp.17.MACAddress",
+                "node1": "LANDevice.1.LANHostConfigManagement.X_FH_StaticDhcp.17.IPAddress"
             ]),
-            "value": .strings(["MAC": "02:AA:BB:CC:DD:EE", "IP": "192.168.8.120"])
+            "value": .strings(["node0": "02:AA:BB:CC:DD:EE", "node1": "192.168.8.120"])
         ]))
     }
 
     @Test func matchingReservationDoesNotWriteAgain() async throws {
-        let rpc = DHCPReservationRPC(replies: [configuration(), table(index: "17", ip: "192.168.8.120")])
-        let saved = try await DHCPReservationService(rpc: rpc).reserve(mac: "02:AA:BB:CC:DD:EE", ip: "192.168.8.120")
-        #expect(saved.index == 17)
-        #expect(await rpc.calls.count == 2)
-    }
-
-    @Test func conflictingIPAddressIsRejectedBeforeWriting() async throws {
-        let rpc = DHCPReservationRPC(replies: [configuration(),
-                                              table(index: "17", mac: "02:11:22:33:44:55", ip: "192.168.8.120")])
-        await #expect(throws: DHCPReservationError.addressConflict) {
-            try await DHCPReservationService(rpc: rpc).reserve(mac: "02:AA:BB:CC:DD:EE", ip: "192.168.8.120")
-        }
-        #expect(await rpc.calls.count == 2)
-    }
-
-    @Test func disabledDHCPIsRejectedBeforeWriting() async throws {
-        let rpc = DHCPReservationRPC(replies: [configuration(enabled: "0")])
-        await #expect(throws: DHCPReservationError.dhcpDisabled) {
-            try await DHCPReservationService(rpc: rpc).reserve(mac: "02:AA:BB:CC:DD:EE", ip: "192.168.8.120")
-        }
+        let rpc = DHCPReservationRPC(replies: [table(index: "17", ip: "192.168.8.120")])
+        _ = try await DHCPReservationService(rpc: rpc).reserve(mac: "02:AA:BB:CC:DD:EE", ip: "192.168.8.120")
         #expect(await rpc.calls.count == 1)
     }
 
-    @Test(arguments: ["192.168.8.9", "192.168.8.201", "192.168.9.120"])
-    func addressOutsideTheActualDHCPPoolIsRejectedBeforeWriting(_ ip: String) async throws {
-        let rpc = DHCPReservationRPC(replies: [configuration()])
-        await #expect(throws: DHCPReservationError.outsideAddressPool(min: "192.168.8.10", max: "192.168.8.200")) {
-            try await DHCPReservationService(rpc: rpc).reserve(mac: "02:AA:BB:CC:DD:EE", ip: ip)
-        }
-        #expect(await rpc.calls.count == 1)
-    }
-
-    @Test func routerAddressIsRejectedBeforeWriting() async throws {
-        let rpc = DHCPReservationRPC(replies: [configuration()])
-        await #expect(throws: DHCPReservationError.routerAddress) {
-            try await DHCPReservationService(rpc: rpc).reserve(mac: "02:AA:BB:CC:DD:EE", ip: "192.168.8.1")
-        }
-        #expect(await rpc.calls.count == 1)
+    @Test(arguments: ["192.168.8.1", "192.168.9.120", "192.168.8.0", "192.168.8.255"])
+    func delegatesAddressPoolAndGatewayDecisionsToFirmware(_ ip: String) async throws {
+        let rpc = DHCPReservationRPC(replies: [table(), .strings(["success": "true"]), table(index: "9", ip: ip)])
+        _ = try await DHCPReservationService(rpc: rpc).reserve(mac: "02:AA:BB:CC:DD:EE", ip: ip)
+        #expect(await rpc.calls.map(\.method) == ["get_xml_childnode_value", "add_set_xmlnode", "get_xml_childnode_value"])
     }
 
     @Test func invalidInputNeverSendsAnRPC() async throws {
@@ -138,20 +102,20 @@ struct DHCPReservationTests {
         #expect(await rpc.calls.isEmpty)
     }
 
-    @Test func successfulAcknowledgementWithoutMatchingReadBackIsUncertainAndNeverRetried() async throws {
-        let rpc = DHCPReservationRPC(replies: [configuration(), table(), .strings(["success": "true"]), table()])
-        await #expect(throws: CPEError.uncertain) {
-            try await DHCPReservationService(rpc: rpc).reserve(mac: "02:AA:BB:CC:DD:EE", ip: "192.168.8.120")
-        }
+    @Test func acknowledgedWriteReturnsTheRefreshedTableWithoutComparingFields() async throws {
+        let rpc = DHCPReservationRPC(replies: [table(), .strings(["success": "true"]), table()])
+        let refreshed = try await DHCPReservationService(rpc: rpc).reserve(mac: "02:AA:BB:CC:DD:EE", ip: "192.168.8.120")
+        #expect(refreshed.isEmpty)
         #expect(await rpc.calls.filter { $0.method == "add_set_xmlnode" }.count == 1)
+        #expect(await rpc.calls.count == 3)
     }
 
-    @Test func explicitWriteRejectionIsSurfaced() async throws {
-        let rpc = DHCPReservationRPC(replies: [configuration(), table(), .strings(["success": "false"])])
+    @Test func explicitWriteRejectionIsSurfacedWithoutRefresh() async throws {
+        let rpc = DHCPReservationRPC(replies: [table(), .strings(["success": "false"])])
         await #expect(throws: CPEError.rejected) {
             try await DHCPReservationService(rpc: rpc).reserve(mac: "02:AA:BB:CC:DD:EE", ip: "192.168.8.120")
         }
-        #expect(await rpc.calls.count == 3)
+        #expect(await rpc.calls.count == 2)
     }
 
     @Test func malformedTableCannotBeMistakenForNoReservations() async throws {
@@ -161,48 +125,28 @@ struct DHCPReservationTests {
         }
     }
 
-    @Test func unsafeInstanceIndexCannotBecomeAnEditPath() async throws {
+    @Test func unparseableInstanceIndexIsSkipped() async throws {
         let rpc = DHCPReservationRPC(replies: [table(index: "17.IPAddress", ip: "192.168.8.110")])
-        await #expect(throws: CPEError.malformedResponse) {
-            try await DHCPReservationService(rpc: rpc).read()
-        }
+        #expect(try await DHCPReservationService(rpc: rpc).read().isEmpty)
     }
 
-    @Test(arguments: ["255.255.255.250", "0.0.0.0", "255.255.255.255"])
-    func unusableSubnetMaskStopsBeforeReadingOrWritingTheTable(_ mask: String) async throws {
-        let rpc = DHCPReservationRPC(replies: [configuration(mask: mask)])
-        await #expect(throws: CPEError.malformedResponse) {
-            try await DHCPReservationService(rpc: rpc).reserve(mac: "02:AA:BB:CC:DD:EE", ip: "192.168.8.120")
-        }
-        #expect(await rpc.calls.count == 1)
-    }
-
-    @Test(arguments: ["192.168.8.0", "192.168.8.255"])
-    func subnetBoundaryIsRejectedEvenIfThePoolIncludesIt(_ ip: String) async throws {
-        let rpc = DHCPReservationRPC(replies: [configuration(min: "192.168.8.0", max: "192.168.8.255")])
-        await #expect(throws: DHCPReservationError.invalidIPAddress) {
-            try await DHCPReservationService(rpc: rpc).reserve(mac: "02:AA:BB:CC:DD:EE", ip: ip)
-        }
-        #expect(await rpc.calls.count == 1)
-    }
-
-    @Test func cleanupDeletesOnlyItsConfirmedBindingAndChecksTheTable() async throws {
-        let rpc = DHCPReservationRPC(replies: [table(index: "17", ip: "192.168.8.120"),
-                                              .strings(["success": "true"]), table()])
+    @Test func removeUsesTheLoadedIndexAndRefreshesOnce() async throws {
+        let rpc = DHCPReservationRPC(replies: [.strings(["success": "true"]), table()])
         let binding = try DHCPReservation(mac: "02:AA:BB:CC:DD:EE", ip: "192.168.8.120", index: 17)
-        try await DHCPReservationService(rpc: rpc).remove(binding)
+        let refreshed = try await DHCPReservationService(rpc: rpc).remove(binding)
+        #expect(refreshed.isEmpty)
         let calls = await rpc.calls
-        #expect(calls.map(\.method) == ["get_xml_childnode_value", "del_xmlnode", "get_xml_childnode_value"])
-        #expect(calls[1].data == .object([
+        #expect(calls.map(\.method) == ["del_xmlnode", "get_xml_childnode_value"])
+        #expect(calls[0].data == .object([
             "url": .string("LANDevice.1.LANHostConfigManagement.X_FH_StaticDhcp"), "index": .number(17)
         ]))
     }
 
-    @Test func cleanupCannotDeleteAConcurrentlyChangedBinding() async throws {
-        let rpc = DHCPReservationRPC(replies: [table(index: "17", ip: "192.168.8.130")])
-        let binding = try DHCPReservation(mac: "02:AA:BB:CC:DD:EE", ip: "192.168.8.120", index: 17)
-        await #expect(throws: CPEError.uncertain) { try await DHCPReservationService(rpc: rpc).remove(binding) }
-        #expect(await rpc.calls.count == 1)
+    @Test func removeWithoutAnInstanceIndexDoesNotCallTheRouter() async throws {
+        let rpc = DHCPReservationRPC(replies: [])
+        let binding = try DHCPReservation(mac: "02:AA:BB:CC:DD:EE", ip: "192.168.8.120")
+        await #expect(throws: CPEError.malformedResponse) { try await DHCPReservationService(rpc: rpc).remove(binding) }
+        #expect(await rpc.calls.isEmpty)
     }
 
     private func table(index: String? = nil, mac: String = "02:AA:BB:CC:DD:EE", ip: String = "") -> JSONValue {
@@ -210,10 +154,7 @@ struct DHCPReservationTests {
         return .object(["data": .array(rows)])
     }
 
-    private func configuration(enabled: String = "1", min: String = "192.168.8.10", max: String = "192.168.8.200",
-                               mask: String = "255.255.255.0") -> JSONValue {
-        .strings(["enabled": enabled, "router": "192.168.8.1", "min": min, "max": max, "mask": mask])
-    }
+
 }
 
 private actor DHCPReservationRPC: DeviceRPC {

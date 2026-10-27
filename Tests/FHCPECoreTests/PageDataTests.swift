@@ -104,6 +104,14 @@ struct PageDataTests {
         #expect(staleData.devices.isEmpty)
     }
 
+    @Test(arguments: [("59", "0 分钟"), ("900", "15 分钟"), ("3660", "1 小时 1 分"),
+                      ("90000", "1 天 1 小时")])
+    func uptimeUsesSharedDurationFormattingWithExistingMinuteWording(seconds: String, expected: String) {
+        var reading = previousReading()
+        reading.uptime = seconds
+        #expect(PageData(snapshot: reading, connected: true).uptimeText == expected)
+    }
+
     private func previousReading() -> DeviceSnapshot {
         var reading = DeviceSnapshot()
         reading.model = "LG6851F"

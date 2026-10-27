@@ -354,9 +354,13 @@ struct Probe {
                                          internalPort: 59999, internalEnd: 59999,
                                          externalPort: 59999, externalEnd: 59999,
                                          proto: .tcp, enabled: false)
-            let entry = try await session.addPortMapping(input)
+            let previousIDs = Set(try await session.readPortMappings().map(\.id))
+            let updated = try await session.addPortMapping(input)
+            guard let entry = updated.first(where: { !previousIDs.contains($0.id) }) else {
+                throw CPEError.uncertain
+            }
             print("added port mapping: \(entry.id) \(entry.localIP) \(entry.internalRange)")
-            try await session.deletePortMapping(entry)
+            _ = try await session.deletePortMapping(entry)
             print("deleted port mapping: \(entry.id)")
             print("remaining: \(try await session.readPortMappings().count)")
         } catch {
@@ -394,9 +398,13 @@ struct Probe {
             guard let wan = mobile.cellularWAN else { print("no cellular WAN"); return }
             let input = DDNSInput(wan: wan, provider: "dyndns", hostname: "fhcpem-test.invalid",
                                   username: "fhcpem", password: "test-only", enabled: false)
-            let entry = try await session.addDDNS(input)
+            let previousIDs = Set(try await session.readDDNS().map(\.id))
+            let updated = try await session.addDDNS(input)
+            guard let entry = updated.first(where: { !previousIDs.contains($0.id) }) else {
+                throw CPEError.uncertain
+            }
             print("added ddns: \(entry.id) \(entry.hostname) enabled=\(entry.enabled)")
-            try await session.deleteDDNS(entry)
+            _ = try await session.deleteDDNS(entry)
             print("deleted ddns: \(entry.id)")
             print("remaining: \(try await session.readDDNS().count)")
         } catch {
@@ -408,13 +416,9 @@ struct Probe {
 private func printThreads(_ session: DeviceSession) async {
     do {
         let threads = try await session.threads()
-        print("threads: \(threads.count)")
-        for thread in threads {
-            print("  \(thread.phone): \(thread.messages.count) messages")
-            for message in thread.messages.suffix(4) {
-                print("    [\(message.isSent ? "sent" : "recv")] \(message.date) \(message.body.prefix(50))")
-            }
-        }
+        let messages = threads.reduce(0) { $0 + $1.messages.count }
+        let unread = threads.reduce(0) { $0 + $1.unreadCount }
+        print("threads: \(threads.count), messages: \(messages), unread: \(unread)")
     } catch {
         print("sms read failed: \(error)")
     }

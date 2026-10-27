@@ -24,8 +24,8 @@ public struct CellularDetailPage: View {
     /// Both values now open the same complete page.
     public var initialTab = 0
     @State private var selection: String?
-    @State private var lteBandText = ""
-    @State private var nrBandText = ""
+    @State private var selectedLTEBands: Set<Int> = []
+    @State private var selectedNRBands: Set<Int> = []
     @State private var cellEditorPresented = false
     @State private var editingCellIndex: Int?
     @State private var editingCellAct = 2
@@ -72,7 +72,7 @@ public struct CellularDetailPage: View {
             if !live {
                 cellEditorPresented = false; selection = nil
                 editingCellIndex = nil; editingCellARFCN = ""; editingCellPCI = ""
-                lteBandText = ""; nrBandText = ""
+                selectedLTEBands = []; selectedNRBands = []
             }
         }
         .sheet(isPresented: $cellEditorPresented) { cellEditor }
@@ -593,7 +593,7 @@ public struct CellularDetailPage: View {
                         Toggle("锁频段", isOn: Binding(
                         get: { effectiveLockState.bandLockEnabled },
                         set: { enabled in
-                            onSetBandLockEnabled?(enabled, parsedLTEBands ?? [], parsedNRBands ?? [])
+                            onSetBandLockEnabled?(enabled, selectedLTEBands.sorted(), selectedNRBands.sorted())
                         }
                     ))
                     .labelsHidden()
@@ -606,20 +606,16 @@ public struct CellularDetailPage: View {
                     }
                 }
                 Rectangle().fill(Theme.hairline).frame(height: 0.5)
-                bandInput(label: "4G LTE", text: $lteBandText, prefix: "B", supported: effectiveLockState.supportedLTEBands)
-                bandInput(label: "5G NR", text: $nrBandText, prefix: "N", supported: effectiveLockState.supportedNRBands)
+                bandChips(label: "4G LTE", selection: $selectedLTEBands, prefix: "B", supported: effectiveLockState.supportedLTEBands)
+                bandChips(label: "5G NR", selection: $selectedNRBands, prefix: "N", supported: effectiveLockState.supportedNRBands)
                 HStack(alignment: .center, spacing: 7) {
-                    Text(effectiveLockState.supportedLTEBands.contains(12)
-                         ? "频段以逗号分隔；B12/B17 合并选择。"
-                         : "频段以逗号分隔；LTE 不可只选 B32。")
+                    Text("点击频段可多选，至少选择一个。")
                         .font(.system(size: 9, weight: .medium))
                         .foregroundStyle(Theme.inkMuted)
                         .fixedSize(horizontal: false, vertical: true)
                     Spacer(minLength: 0)
                     Button(effectiveLockState.bandLockEnabled ? "保存频段" : "启用锁频段") {
-                        if let lte = parsedLTEBands, let nr = parsedNRBands {
-                            onSetBandLockEnabled?(true, lte, nr)
-                        }
+                        onSetBandLockEnabled?(true, selectedLTEBands.sorted(), selectedNRBands.sorted())
                     }
                     .buttonStyle(.plain)
                     .font(.system(size: 10, weight: .semibold))
@@ -630,45 +626,47 @@ public struct CellularDetailPage: View {
         }
     }
 
-    private func bandInput(label: String, text: Binding<String>, prefix: String, supported: [Int]) -> some View {
-        HStack(spacing: 7) {
+    private func bandChips(label: String, selection: Binding<Set<Int>>, prefix: String,
+                           supported: [Int]) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
             Text(label)
                 .font(.system(size: 10, weight: .semibold))
                 .foregroundStyle(Theme.inkSecondary)
-                .frame(width: 43, alignment: .leading)
-            TextField("例如 \(supported.prefix(2).map { prefix + String($0) }.joined(separator: ", "))", text: text)
-                .textFieldStyle(.roundedBorder)
-                .font(.system(size: 10.5, weight: .medium).monospacedDigit())
-                .controlSize(.small)
-                .disabled(!canConfigureLocks || onSetBandLockEnabled == nil)
-                .help("支持：" + supported.map { prefix + String($0) }.joined(separator: "、"))
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 43), spacing: 5)], spacing: 5) {
+                ForEach(supported, id: \.self) { band in
+                    let selected = selection.wrappedValue.contains(band)
+                    Button {
+                        if selected { selection.wrappedValue.remove(band) }
+                        else { selection.wrappedValue.insert(band) }
+                    } label: {
+                        Text("\(prefix)\(band)")
+                            .font(.system(size: 10, weight: selected ? .semibold : .medium).monospacedDigit())
+                            .foregroundStyle(selected ? Color.accentColor : Theme.inkSecondary)
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 25)
+                            .background(selected ? Color.accentColor.opacity(0.13) : Theme.surface, in: Capsule())
+                            .overlay(Capsule().strokeBorder(selected ? Color.accentColor.opacity(0.5) : Theme.hairlineStrong,
+                                                            lineWidth: 0.75))
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(!canConfigureLocks || onSetBandLockEnabled == nil)
+                    .accessibilityLabel("\(label) 频段 \(prefix)\(band)")
+                    .accessibilityValue(selected ? "已选择" : "未选择")
+                    .accessibilityAddTraits(selected ? .isSelected : [])
+                }
+            }
         }
     }
 
-    private static func parseBandInput(_ raw: String, prefix: Character) -> [Int]? {
-        let separators = CharacterSet(charactersIn: ",，、;； ").union(.whitespacesAndNewlines)
-        let values = raw.uppercased().components(separatedBy: separators).filter { !$0.isEmpty }
-        var result: [Int] = []
-        for value in values {
-            let number = value.first == prefix ? String(value.dropFirst()) : value
-            guard let band = Int(number), band > 0 else { return nil }
-            result.append(band)
-        }
-        return Array(Set(result)).sorted()
-    }
-
-    private var parsedLTEBands: [Int]? { Self.parseBandInput(lteBandText, prefix: "B") }
-    private var parsedNRBands: [Int]? { Self.parseBandInput(nrBandText, prefix: "N") }
     private var bandDraftIsValid: Bool {
-        guard let lte = parsedLTEBands, let nr = parsedNRBands, !lte.isEmpty || !nr.isEmpty,
-              lte.allSatisfy(effectiveLockState.supportedLTEBands.contains),
-              nr.allSatisfy(effectiveLockState.supportedNRBands.contains), lte != [32], nr != [29] else { return false }
-        return lte.isEmpty || !Set(lte).isSubset(of: [29, 46])
+        (!selectedLTEBands.isEmpty || !selectedNRBands.isEmpty) &&
+        selectedLTEBands.isSubset(of: effectiveLockState.supportedLTEBands) &&
+        selectedNRBands.isSubset(of: effectiveLockState.supportedNRBands)
     }
 
     private func loadBandDrafts() {
-        lteBandText = effectiveLockState.lteBands.map(String.init).joined(separator: ",")
-        nrBandText = effectiveLockState.nrBands.map(String.init).joined(separator: ",")
+        selectedLTEBands = Set(effectiveLockState.lteBands)
+        selectedNRBands = Set(effectiveLockState.nrBands)
     }
 
     private func presentCellEditor(_ item: LockedCell?) {
@@ -692,8 +690,7 @@ public struct CellularDetailPage: View {
         let pci = rawPCI.isEmpty ? nil : Int(rawPCI)
         guard rawPCI.isEmpty || pci != nil,
               let arfcn = Int(editingCellARFCN),
-              (0...875000).contains(arfcn), pci.map({ (0...2000).contains($0) }) ?? true,
-              effectiveLockState.allowsN79ARFCN || !(693335...733333).contains(arfcn) else { return nil }
+              (0...875000).contains(arfcn), pci.map({ (0...2000).contains($0) }) ?? true else { return nil }
         return LockedCell(index: editingCellIndex ?? 0, act: editingCellAct, arfcn: arfcn, pci: pci)
     }
 

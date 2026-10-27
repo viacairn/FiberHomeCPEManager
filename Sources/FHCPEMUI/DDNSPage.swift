@@ -2,108 +2,60 @@ import SwiftUI
 import FHCPECore
 
 public struct DDNSPage: View {
-    public let entries: [DDNSEntry]
-    public let wans: [WANConnectionRef]
-    public let busy: Bool
-    public let isLive: Bool
-    public let status: String?
-    public let statusIsError: Bool
-    public let onBack: () -> Void
-    public let onReload: () -> Void
-    public let onSave: (DDNSEntry?, DDNSInput) async throws -> Void
-    public let onDelete: (DDNSEntry) async throws -> Void
-    public let onToggle: (DDNSEntry, Bool) async throws -> Void
-
-    public init(entries: [DDNSEntry], wans: [WANConnectionRef], busy: Bool,
-                isLive: Bool = true, status: String?, statusIsError: Bool,
-                onBack: @escaping () -> Void, onReload: @escaping () -> Void,
-                onSave: @escaping (DDNSEntry?, DDNSInput) async throws -> Void,
-                onDelete: @escaping (DDNSEntry) async throws -> Void,
-                onToggle: @escaping (DDNSEntry, Bool) async throws -> Void) {
-        self.entries = entries; self.wans = wans; self.busy = busy; self.isLive = isLive
-        self.status = status; self.statusIsError = statusIsError
-        self.onBack = onBack; self.onReload = onReload
-        self.onSave = onSave; self.onDelete = onDelete; self.onToggle = onToggle
-    }
-
-    @State private var pageActive = true
-    @State private var mutationToken: UUID?
-    @State private var mutationTask: Task<Void, Never>?
-    @State private var showingEditor = false
-    @State private var editingID: String?
+    @Bindable public var model: ShellModel
     @State private var deletingID: String?
-    @State private var draft = DDNSDraft()
-    @State private var rowError: String?
-    @State private var formError: String?
+    public init(model: ShellModel) { self.model = model }
 
-    private var working: Bool { busy || mutationToken != nil }
-    private var canWrite: Bool { isLive && pageActive && !working }
-    private var canOpenAction: Bool { canWrite && !showingEditor && deletingID == nil }
+    private var entries: [DDNSEntry] { model.ddnsEntries }
+    private var wans: [WANConnectionRef] { model.wanConnections }
+    private var busy: Bool { model.advancedBusy || model.advancedSaving }
+    private var isLive: Bool { model.data.isLive }
+    private var canWrite: Bool { isLive && !busy }
+    private var canOpenAction: Bool { canWrite && !model.ddnsEditorPresented && deletingID == nil }
     private var availableWANs: [WANConnectionRef] {
         wans.filter { wan in entries.filter { $0.wan.id == wan.id }.count < 4 }
     }
     private var canAdd: Bool { canOpenAction && !availableWANs.isEmpty }
-    private var editorWANs: [WANConnectionRef] { editingID == nil ? availableWANs : wans }
-    private var editorInput: DDNSInput? { draft.input(wans: editorWANs) }
+    private var editorWANs: [WANConnectionRef] { model.editingDDNS == nil ? availableWANs : wans }
+    private var editorInput: DDNSInput? { model.ddnsDraft.input(wans: editorWANs) }
     private var validationError: String? {
-        guard editorInput != nil else { return "未读取到可用的 WAN 连接。" }
-        return draft.validationError ?? editorInput?.validationError
+        guard let input = editorInput else { return "请填写完整配置并选择可用的 WAN 连接。" }
+        return model.ddnsDraft.validationError ?? input.validationError
     }
 
     public var body: some View {
         VStack(spacing: 0) {
             SubpageBar(title: "DDNS 设置", actionSymbol: canAdd ? "plus" : nil,
-                       actionLabel: "添加 DDNS", onAction: { presentEditor(nil) }, onBack: leavePage)
-            if isLive {
-                onlineContent
-            } else {
-                AdvancedSettingsDisconnectedState()
-            }
+                       actionLabel: "添加 DDNS", onAction: { model.presentDDNSEditor(nil) },
+                       onBack: model.closeDDNS)
+            if isLive { onlineContent } else { AdvancedSettingsDisconnectedState() }
         }
-        .sheet(isPresented: editorPresentation, onDismiss: clearEditor) {
-            if isLive {
-                DDNSForm(draft: $draft, wans: editorWANs, editing: editingID != nil,
-                         locked: working, saving: mutationToken != nil,
-                         error: formError ?? validationError,
-                         canSave: canWrite && editorInput != nil && validationError == nil,
-                         onCancel: clearEditor, onSave: saveEditor)
-            }
+        .sheet(isPresented: $model.ddnsEditorPresented, onDismiss: model.dismissDDNSEditor) {
+            DDNSForm(draft: $model.ddnsDraft, wans: editorWANs, editing: model.editingDDNS != nil,
+                     locked: busy, saving: model.advancedSaving,
+                     error: isLive ? validationError : "连接暂时中断，恢复后可继续保存。",
+                     canSave: canWrite && validationError == nil,
+                     onCancel: model.dismissDDNSEditor, onSave: saveEditor)
         }
-        .confirmationDialog("删除 DDNS？", isPresented: deletionPresentation,
-                            titleVisibility: .visible, presenting: deletingID) { id in
-            Button("删除", role: .destructive) { confirmDelete(id) }
-                .disabled(!canWrite)
+        .confirmationDialog("删除 DDNS？", isPresented: Binding(
+            get: { deletingID != nil }, set: { if !$0 { deletingID = nil } }),
+            titleVisibility: .visible) {
+            Button("删除", role: .destructive) {
+                guard let entry = entries.first(where: { $0.id == deletingID }) else { return }
+                deletingID = nil
+                model.performAdvancedMutation { try await model.deleteDDNS(entry) }
+            }
+            .disabled(!canWrite)
             Button("取消", role: .cancel) { deletingID = nil }
-        } message: { _ in
-            Text("将删除这条 DDNS 配置。")
         }
-        .onAppear {
-            pageActive = isLive
-            if !isLive { invalidatePage() }
-        }
-        .onChange(of: isLive) { _, live in
-            invalidatePage()
-            pageActive = live
-        }
-        .onChange(of: entries) { _, _ in
-            rowError = nil
-            if let editingID, !entries.contains(where: { $0.id == editingID }) { clearEditor() }
-            if let deletingID, !entries.contains(where: { $0.id == deletingID }) { self.deletingID = nil }
-        }
-        .onChange(of: wans) { _, _ in
-            if showingEditor, !editorWANs.contains(where: { $0.id == draft.wanID }) { clearEditor() }
-            deletingID = nil
-        }
-        .onDisappear { invalidatePage() }
-        .appReminder(rowError)
     }
 
-    private var editorPresentation: Binding<Bool> {
-        Binding(get: { isLive && showingEditor }, set: { if !$0 { clearEditor() } })
-    }
-
-    private var deletionPresentation: Binding<Bool> {
-        Binding(get: { isLive && deletingID != nil }, set: { if !$0 { deletingID = nil } })
+    private func saveEditor() {
+        guard canWrite, validationError == nil, let input = editorInput else { return }
+        let entry = model.editingDDNS
+        model.performAdvancedMutation({
+            try await model.saveDDNS(entry, input)
+        }, onSuccess: model.dismissDDNSEditor)
     }
 
     private var onlineContent: some View {
@@ -160,7 +112,7 @@ public struct DDNSPage: View {
 
     private func row(_ entry: DDNSEntry) -> some View {
         HStack(spacing: 8) {
-            Button { presentEditor(entry) } label: {
+            Button { model.presentDDNSEditor(entry) } label: {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(entry.hostname)
                         .font(.system(size: 11.5, weight: .semibold))
@@ -182,7 +134,7 @@ public struct DDNSPage: View {
                 get: { entry.enabled },
                 set: { value in
                     guard canOpenAction, knowsWAN(entry) else { return }
-                    mutate(fromEditor: false) { try await onToggle(entry, value) }
+                    model.performAdvancedMutation { try await model.setDDNSEnabled(entry, value) }
                 }
             ))
             .labelsHidden()
@@ -210,117 +162,6 @@ public struct DDNSPage: View {
         .frame(minHeight: 38)
     }
 
-    private func presentEditor(_ entry: DDNSEntry?) {
-        guard canOpenAction else { return }
-        if let entry {
-            guard knowsWAN(entry) else { return }
-        } else {
-            guard !availableWANs.isEmpty else { return }
-        }
-        editingID = entry?.id
-        draft = DDNSDraft(entry: entry, wans: entry == nil ? availableWANs : wans)
-        formError = nil
-        showingEditor = true
-    }
-
-    private func saveEditor() {
-        guard showingEditor, canWrite, let input = editorInput, validationError == nil else { return }
-        let entry: DDNSEntry?
-        if let editingID {
-            guard let current = entries.first(where: { $0.id == editingID }), knowsWAN(current) else {
-                clearEditor()
-                return
-            }
-            entry = current
-        } else { entry = nil }
-        mutate(fromEditor: true) { try await onSave(entry, input) }
-    }
-
-    private func confirmDelete(_ id: String) {
-        guard canWrite,
-              let entry = entries.first(where: { $0.id == id }), knowsWAN(entry) else {
-            self.deletingID = nil
-            return
-        }
-        self.deletingID = nil
-        mutate(fromEditor: false) { try await onDelete(entry) }
-    }
-
-    /// Every write shares this synchronous gate. The token is checked again after each
-    /// suspension so completion from a dismissed or disconnected page cannot fill it.
-    private func mutate(fromEditor: Bool, _ action: @escaping () async throws -> Void) {
-        guard canWrite else { return }
-        let token = UUID()
-        mutationToken = token
-        rowError = nil; formError = nil
-        mutationTask = Task { @MainActor in
-            do {
-                guard pageActive, mutationToken == token, !Task.isCancelled else { return }
-                try await action()
-                guard pageActive, mutationToken == token, !Task.isCancelled else { return }
-                mutationToken = nil; mutationTask = nil
-                if fromEditor { clearEditor() }
-                onReload()
-            } catch {
-                guard pageActive, mutationToken == token, !Task.isCancelled else { return }
-                mutationToken = nil; mutationTask = nil
-                if fromEditor { formError = error.localizedDescription }
-                else { rowError = error.localizedDescription }
-            }
-        }
-    }
-
-    private func clearEditor() {
-        showingEditor = false; editingID = nil
-        draft = DDNSDraft(); formError = nil
-    }
-
-    private func invalidatePage() {
-        pageActive = false; mutationToken = nil
-        mutationTask?.cancel(); mutationTask = nil
-        clearEditor()
-        deletingID = nil; rowError = nil
-    }
-
-    private func leavePage() {
-        invalidatePage()
-        onBack()
-    }
-}
-
-private struct DDNSDraft {
-    var wanID = ""
-    var providerChoice = "dyndns"
-    var customProvider = ""
-    var hostname = ""
-    var username = ""
-    var password = ""
-    var enabled = false
-
-    init(entry: DDNSEntry? = nil, wans: [WANConnectionRef] = []) {
-        wanID = entry?.wan.id ?? wans.first?.id ?? ""
-        if let entry {
-            let known = DDNSInput.providers.contains(entry.provider)
-            providerChoice = known ? entry.provider : "Others"
-            customProvider = known ? "" : entry.provider
-            hostname = entry.hostname; username = entry.username; password = entry.password
-            enabled = entry.enabled
-        }
-    }
-
-    func input(wans: [WANConnectionRef]) -> DDNSInput? {
-        guard let wan = wans.first(where: { $0.id == wanID }) else { return nil }
-        return DDNSInput(wan: wan, provider: providerChoice == "Others" ? customProvider : providerChoice,
-                         hostname: hostname, username: username, password: password, enabled: enabled)
-    }
-
-    var validationError: String? {
-        let provider = providerChoice == "Others" ? customProvider : providerChoice
-        guard [provider, hostname, username, password].allSatisfy({ !$0.isEmpty && $0.count <= 64 }) else {
-            return "服务商地址、域名、用户名和密码均须为 1–64 个字符。"
-        }
-        return nil
-    }
 }
 
 private struct DDNSForm: View {
@@ -374,6 +215,11 @@ private struct DDNSForm: View {
                     .toggleStyle(.checkbox)
                     .font(.system(size: 11))
                     .disabled(locked)
+                if let error {
+                    Text(error).font(.system(size: 10.5))
+                        .foregroundStyle(Theme.inkSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 HStack(spacing: 8) {
                     Button("取消", action: onCancel)
                         .buttonStyle(.plain)
@@ -397,7 +243,6 @@ private struct DDNSForm: View {
         .frame(width: Theme.compactWidth - 32)
         .frame(maxHeight: Theme.canvasHeight)
         .interactiveDismissDisabled(saving)
-        .appReminder(error)
         .appNoticeOverlay(top: 36)
     }
 

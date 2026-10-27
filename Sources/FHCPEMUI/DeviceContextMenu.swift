@@ -10,12 +10,16 @@ struct DeviceContextMenu: NSViewRepresentable {
     let canReserveIP: Bool
     let onReserve: (ConnectedDevice) -> Void
     let onGlyph: (ConnectedDevice, DeviceGlyph?) -> Void
+    var isReserved = false
+    var canRemoveReservation = false
+    var onRemove: (ConnectedDevice) -> Void = { _ in }
 
     func makeNSView(context: Context) -> DeviceMenuView { DeviceMenuView() }
 
     func updateNSView(_ view: DeviceMenuView, context: Context) {
         view.configure(device: device, glyph: glyph, canReserveIP: canReserveIP,
-                       onReserve: onReserve, onGlyph: onGlyph)
+                       onReserve: onReserve, onGlyph: onGlyph, isReserved: isReserved,
+                       canRemoveReservation: canRemoveReservation, onRemove: onRemove)
     }
 
     static func dismantleNSView(_ view: DeviceMenuView, coordinator: ()) {
@@ -28,20 +32,31 @@ final class DeviceMenuView: NSView {
     private var device: ConnectedDevice?
     private var glyph: DeviceGlyph?
     private var canReserveIP = false
+    private var isReserved = false
+    private var canRemoveReservation = false
+    private var onRemove: ((ConnectedDevice) -> Void)?
     private var onReserve: ((ConnectedDevice) -> Void)?
     private var onGlyph: ((ConnectedDevice, DeviceGlyph?) -> Void)?
+    private var onCopy: ((String) -> Void)?
     private var activeMenu: NSMenu?
 
     func configure(device: ConnectedDevice, glyph: DeviceGlyph?, canReserveIP: Bool,
                    onReserve: @escaping (ConnectedDevice) -> Void,
-                   onGlyph: @escaping (ConnectedDevice, DeviceGlyph?) -> Void) {
+                   onGlyph: @escaping (ConnectedDevice, DeviceGlyph?) -> Void,
+                   isReserved: Bool = false, canRemoveReservation: Bool = false,
+                   onRemove: @escaping (ConnectedDevice) -> Void = { _ in },
+                   onCopy: @escaping (String) -> Void = { value in
+                       NSPasteboard.general.clearContents()
+                       NSPasteboard.general.setString(value, forType: .string)
+                   }) {
         if self.device?.id != device.id || self.device?.mac != device.mac { cancelTracking() }
         self.device = device; self.glyph = glyph; self.canReserveIP = canReserveIP
-        self.onReserve = onReserve; self.onGlyph = onGlyph
+        self.onReserve = onReserve; self.onGlyph = onGlyph; self.onCopy = onCopy
+        self.isReserved = isReserved; self.canRemoveReservation = canRemoveReservation; self.onRemove = onRemove
         setAccessibilityElement(true)
         setAccessibilityRole(.group)
-        setAccessibilityLabel("\(device.name)，\(device.ip)，\(device.access.title)")
-        setAccessibilityHelp("右键设置固定 IP 或设备图标")
+        setAccessibilityLabel("\(device.name)，\(device.ip)，\(device.access.title)\(isReserved ? "，已绑定固定 IP" : "")")
+        setAccessibilityHelp("右键复制地址、管理固定 IP 或设备图标")
     }
 
     override func hitTest(_ point: NSPoint) -> NSView? {
@@ -75,10 +90,21 @@ final class DeviceMenuView: NSView {
     }
 
     func makeMenuSnapshot() -> NSMenu? {
-        guard let device, let onReserve, let onGlyph else { return nil }
+        guard let device, let onReserve, let onGlyph, let onCopy else { return nil }
         let menu = DeviceActionMenu(title: "设备配置")
         menu.autoenablesItems = false
-        menu.append("设置固定 IP…", symbol: "pin", enabled: canReserveIP) { onReserve(device) }
+        menu.append(isReserved ? "修改固定 IP…" : "设置固定 IP…", symbol: "pin", enabled: canReserveIP) { onReserve(device) }
+        if isReserved, let onRemove {
+            menu.append("解除固定 IP 绑定", symbol: "pin.slash", enabled: canRemoveReservation) { onRemove(device) }
+        }
+        menu.addItem(.separator())
+        menu.append("复制 IP 地址", symbol: "doc.on.doc", enabled: !device.ip.isEmpty && device.ip != "—") {
+            onCopy(device.ip)
+        }
+        let mac = device.mac?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        menu.append("复制 MAC 地址", symbol: "doc.on.doc", enabled: !mac.isEmpty) {
+            onCopy(mac)
+        }
         menu.addItem(.separator())
         let icons = DeviceActionMenu(title: "设置图标")
         icons.autoenablesItems = false

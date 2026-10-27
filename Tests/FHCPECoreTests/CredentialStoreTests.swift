@@ -26,13 +26,13 @@ private final class KeychainDouble: CredentialKeychainClient, @unchecked Sendabl
 struct CredentialStoreTests {
     private let credentials = Credentials(address: "192.0.2.1", username: "test", password: "test-only")
 
-    @Test func successfulLoadUsesNoninteractiveAuthentication() throws {
+    @Test func successfulLoadIncludesAuthenticationContext() throws {
         let client = KeychainDouble()
         client.data = try JSONEncoder().encode(credentials)
         #expect(try CredentialStore(service: "test", keychain: client).load() == credentials)
         let query = try #require(client.requests.first)
         #expect(query[kSecUseAuthenticationUI as String] == nil)
-        #expect((query[kSecUseAuthenticationContext as String] as? LAContext)?.interactionNotAllowed == true)
+        #expect(query[kSecUseAuthenticationContext as String] is LAContext)
     }
 
     @Test func lockedOrUntrustedItemNeverFallsBackToRecreatingIt() {
@@ -57,9 +57,7 @@ struct CredentialStoreTests {
         try CredentialStore(service: "test", keychain: client).save(credentials)
         #expect(client.operations == ["update", "add"])
         #expect(client.requests.allSatisfy { $0[kSecAttrAccess as String] == nil })
-        #expect(client.requests.allSatisfy {
-            ($0[kSecUseAuthenticationContext as String] as? LAContext)?.interactionNotAllowed == true
-        })
+        #expect(client.requests.allSatisfy { $0[kSecUseAuthenticationContext as String] is LAContext })
     }
 
     @Test func missingCredentialIsNotAnError() throws {
@@ -67,32 +65,22 @@ struct CredentialStoreTests {
         #expect(try CredentialStore(service: "test", keychain: client).load() == nil)
     }
 
-    @Test func deletionAlsoPreventsAuthenticationUI() throws {
+    @Test func deletionIncludesAuthenticationContext() throws {
         let client = KeychainDouble()
         try CredentialStore(service: "test", keychain: client).delete()
         #expect(client.operations == ["delete"])
-        #expect((client.requests.first?[kSecUseAuthenticationContext as String] as? LAContext)?.interactionNotAllowed == true)
+        #expect(client.requests.first?[kSecUseAuthenticationContext as String] is LAContext)
     }
 
-    @Test func deniedAccessStopsAllFurtherBackgroundRequests() {
-        for status in [errSecAuthFailed, errSecInteractionNotAllowed, errSecUserCanceled,
-                       errSecNotAvailable, errSecMissingEntitlement] {
-            let gate = CredentialAccessGate()
-            var requests = 0
-            for _ in 0..<50 {
-                #expect(gate.perform { requests += 1; return status } == status)
-            }
-            #expect(requests == 1)
-        }
-    }
-
-    @Test func missingItemDoesNotPreventAddingAndReadingIt() {
-        let gate = CredentialAccessGate()
-        var requests = 0
-        #expect(gate.perform { requests += 1; return errSecItemNotFound } == errSecItemNotFound)
-        #expect(gate.perform { requests += 1; return errSecSuccess } == errSecSuccess)
-        #expect(gate.perform { requests += 1; return errSecSuccess } == errSecSuccess)
-        #expect(requests == 3)
+    @Test func deniedReadDoesNotPreventALaterSuccessfulRead() throws {
+        let client = KeychainDouble()
+        let store = CredentialStore(service: "test", keychain: client)
+        client.status = errSecInteractionNotAllowed
+        #expect(throws: KeychainError.self) { try store.load() }
+        client.status = errSecSuccess
+        client.data = try JSONEncoder().encode(credentials)
+        #expect(try store.load() == credentials)
+        #expect(client.operations == ["copy", "copy"])
     }
 
     @Test(.enabled(if: ProcessInfo.processInfo.environment["FHCPE_KEYCHAIN_SMOKE"] == "1"))

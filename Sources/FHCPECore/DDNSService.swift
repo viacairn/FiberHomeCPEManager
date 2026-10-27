@@ -77,13 +77,17 @@ public struct DDNSService: Sendable {
         let wans = try await WANDiscovery.connections(rpc)
         guard !wans.isEmpty else { throw CPEError.unsupported("未找到可用的 WAN 连接。") }
         var entries: [DDNSEntry] = []
+        var skippedRows = 0
         for wan in wans {
-            entries += try await readEntries(on: wan)
+            let table = try await readEntries(on: wan)
+            entries += table.entries
+            skippedRows += table.rowCount - table.entries.count
         }
+        FirmwareNodes.reportSkippedRows(skippedRows, table: "DDNS 表")
         return entries.sorted { $0.wan.id == $1.wan.id ? $0.index < $1.index : $0.wan.id < $1.wan.id }
     }
 
-    private func readEntries(on wan: WANConnectionRef) async throws -> [DDNSEntry] {
+    private func readEntries(on wan: WANConnectionRef) async throws -> (entries: [DDNSEntry], rowCount: Int) {
         let rows = try await FirmwareNodes(rpc: rpc).child(root: wan.ddnsRoot, fields: [
             "enabled": "DDNSCfgEnabled", "provider": "DDNSProvider", "host": "DDNSHostName",
             "user": "DDNSUsername", "password": "DDNSPassword"
@@ -91,88 +95,65 @@ public struct DDNSService: Sendable {
         var entries: [DDNSEntry] = []
         var indices = Set<Int>()
         for row in rows {
-            guard let index = row["child_node_idx"].nodeIndex, indices.insert(index).inserted,
+            guard let index = row["child_node_idx"].nodeIndex,
                   case .string(let provider) = row["provider"], case .string(let hostname) = row["host"],
-                  case .string(let username) = row["user"], case .string(let password) = row["password"] else {
-                throw CPEError.malformedResponse
+                  case .string(let username) = row["user"], case .string(let password) = row["password"],
+                  let enabled = try? FirmwareNodes.flag(row["enabled"]),
+                  indices.insert(index).inserted else {
+                continue
             }
             entries.append(DDNSEntry(
                 wan: wan, index: index,
                 provider: provider, hostname: hostname, username: username, password: password,
-                enabled: try FirmwareNodes.flag(row["enabled"])
+                enabled: enabled
             ))
         }
-        return entries
-    }
-
-    private func readBack(on wan: WANConnectionRef) async throws -> [DDNSEntry] {
-        let wans = try await WANDiscovery.connections(rpc)
-        guard let current = wans.first(where: { $0.id == wan.id }) else { throw CPEError.uncertain }
-        return try await readEntries(on: current)
+        return (entries, rows.count)
     }
 
     @discardableResult
-    public func add(_ input: DDNSInput) async throws -> DDNSEntry {
+    public func add(_ input: DDNSInput) async throws -> [DDNSEntry] {
         if let error = input.validationError { throw CPEError.unsupported(error) }
-        let nodes = FirmwareNodes(rpc: rpc)
-        let existing = try await readBack(on: input.wan)
-        guard existing.count < Self.maxEntriesPerWAN else {
+        let existing = try await readEntries(on: input.wan)
+        guard existing.rowCount < Self.maxEntriesPerWAN else {
             throw CPEError.unsupported("每个 WAN 最多可添加 \(Self.maxEntriesPerWAN) 条 DDNS 配置。")
         }
-        let index = try await nodes.add(root: input.wan.ddnsRoot, key: "ddns")
-        let base = "\(input.wan.ddnsRoot).\(index)."
-        try await nodes.setMulti([
-            (base + "DDNSCfgEnabled", input.enabled ? "1" : "0"),
-            (base + "DDNSProvider", input.provider),
-            (base + "DDNSHostName", input.hostname),
-            (base + "DDNSUsername", input.username),
-            (base + "DDNSPassword", input.password)
-        ])
-        return try await verify(input, index: index)
+        let index = try await FirmwareNodes(rpc: rpc).add(root: input.wan.ddnsRoot, key: "ddns")
+        try await write(input, index: index)
+        return try await read()
     }
 
     @discardableResult
-    public func update(_ entry: DDNSEntry, with input: DDNSInput) async throws -> DDNSEntry {
+    public func update(_ entry: DDNSEntry, with input: DDNSInput) async throws -> [DDNSEntry] {
         if let error = input.validationError { throw CPEError.unsupported(error) }
         guard entry.wan.id == input.wan.id else { throw CPEError.unsupported("DDNS 条目所属 WAN 不一致。") }
         guard entry.index > 0 else { throw CPEError.malformedResponse }
-        let nodes = FirmwareNodes(rpc: rpc)
-        let base = "\(entry.wan.ddnsRoot).\(entry.index)."
-        try await nodes.setMulti([
-            (base + "DDNSCfgEnabled", input.enabled ? "1" : "0"),
+        try await write(input, index: entry.index)
+        return try await read()
+    }
+
+    private func write(_ input: DDNSInput, index: Int) async throws {
+        let base = "\(input.wan.ddnsRoot).\(index)."
+        try await FirmwareNodes(rpc: rpc).setMulti([
+            (base + "DDNSCfgEnabled", FirmwareNodes.bool(input.enabled)),
             (base + "DDNSProvider", input.provider),
             (base + "DDNSHostName", input.hostname),
             (base + "DDNSUsername", input.username),
             (base + "DDNSPassword", input.password)
         ])
-        return try await verify(input, index: entry.index)
-    }
-
-    public func delete(_ entry: DDNSEntry) async throws {
-        try await FirmwareNodes(rpc: rpc).delete(root: entry.wan.ddnsRoot, index: entry.index)
-        let remaining = try await readBack(on: entry.wan)
-        guard !remaining.contains(where: { $0.index == entry.index }) else {
-            throw CPEError.uncertain
-        }
     }
 
     @discardableResult
-    public func setEnabled(_ entry: DDNSEntry, _ enabled: Bool) async throws -> DDNSEntry {
-        guard entry.index > 0 else { throw CPEError.malformedResponse }
-        let base = "\(entry.wan.ddnsRoot).\(entry.index)."
-        try await FirmwareNodes(rpc: rpc).setSingle(base + "DDNSCfgEnabled", enabled ? "1" : "0")
-        let updated = try await readBack(on: entry.wan)
-        guard let saved = updated.first(where: { $0.index == entry.index }),
-              saved.enabled == enabled else { throw CPEError.uncertain }
-        return saved
+    public func delete(_ entry: DDNSEntry) async throws -> [DDNSEntry] {
+        try await FirmwareNodes(rpc: rpc).delete(root: entry.wan.ddnsRoot, index: entry.index)
+        return try await read()
     }
 
-    private func verify(_ input: DDNSInput, index: Int) async throws -> DDNSEntry {
-        let entries = try await readBack(on: input.wan)
-        guard let saved = entries.first(where: { $0.index == index }),
-              saved.provider == input.provider, saved.hostname == input.hostname,
-              saved.username == input.username, saved.password == input.password,
-              saved.enabled == input.enabled else { throw CPEError.uncertain }
-        return saved
+    @discardableResult
+    public func setEnabled(_ entry: DDNSEntry, _ enabled: Bool) async throws -> [DDNSEntry] {
+        guard entry.index > 0 else { throw CPEError.malformedResponse }
+        let base = "\(entry.wan.ddnsRoot).\(entry.index)."
+        try await FirmwareNodes(rpc: rpc).setSingle(base + "DDNSCfgEnabled", FirmwareNodes.bool(enabled))
+        return try await read()
     }
 }

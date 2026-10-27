@@ -69,53 +69,19 @@ protocol CredentialKeychainClient: Sendable {
 }
 
 private struct SystemCredentialKeychain: CredentialKeychainClient {
-    private static let gate = CredentialAccessGate()
-    /// The app uses the legacy login Keychain. Suppress its optional UI as well as the
-    /// LAContext UI, serializing our synchronous calls and restoring the process setting.
-    private func withoutAuthenticationUI(_ body: () -> OSStatus) -> OSStatus {
-        Self.gate.perform {
-            var previous: DarwinBoolean = true
-            let read = SecKeychainGetUserInteractionAllowed(&previous)
-            guard read == errSecSuccess else { return read }
-            let disabled = SecKeychainSetUserInteractionAllowed(false)
-            guard disabled == errSecSuccess else { return disabled }
-            defer { _ = SecKeychainSetUserInteractionAllowed(previous.boolValue) }
-            return body()
-        }
-    }
     func copy(_ query: [String: Any]) -> (OSStatus, Data?) {
         var result: CFTypeRef?
-        let status = withoutAuthenticationUI { SecItemCopyMatching(query as CFDictionary, &result) }
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
         return (status, result as? Data)
     }
     func update(_ query: [String: Any], attributes: [String: Any]) -> OSStatus {
-        withoutAuthenticationUI { SecItemUpdate(query as CFDictionary, attributes as CFDictionary) }
+        SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
     }
     func add(_ attributes: [String: Any]) -> OSStatus {
-        withoutAuthenticationUI { SecItemAdd(attributes as CFDictionary, nil) }
+        SecItemAdd(attributes as CFDictionary, nil)
     }
     func delete(_ query: [String: Any]) -> OSStatus {
-        withoutAuthenticationUI { SecItemDelete(query as CFDictionary) }
-    }
-}
-
-/// A denied background request closes access for the rest of this process. All store
-/// instances share this gate, so reconnects, reads, or repeated save attempts cannot
-/// keep asking securityd for an item this build is not allowed to access.
-final class CredentialAccessGate: @unchecked Sendable {
-    private let lock = NSLock()
-    private var deniedStatus: OSStatus?
-
-    func perform(_ operation: () -> OSStatus) -> OSStatus {
-        lock.withLock {
-            if let deniedStatus { return deniedStatus }
-            let status = operation()
-            if [errSecAuthFailed, errSecInteractionNotAllowed, errSecUserCanceled,
-                errSecNotAvailable, errSecMissingEntitlement].contains(status) {
-                deniedStatus = status
-            }
-            return status
-        }
+        SecItemDelete(query as CFDictionary)
     }
 }
 

@@ -17,7 +17,6 @@ public enum SMSRefreshPolicy {
 public struct SMSRefreshQueue: Sendable {
     public struct Request: Sendable, Equatable {
         public var quiet: Bool
-        public var keepStatus: Bool
     }
 
     private var pending: Request?
@@ -25,12 +24,11 @@ public struct SMSRefreshQueue: Sendable {
 
     public init() {}
 
-    public mutating func request(quiet: Bool, keepStatus: Bool) {
+    public mutating func request(quiet: Bool) {
         if let previous = pending {
-            pending = Request(quiet: previous.quiet && quiet,
-                              keepStatus: previous.keepStatus && keepStatus)
+            pending = Request(quiet: previous.quiet && quiet)
         } else {
-            pending = Request(quiet: quiet, keepStatus: keepStatus)
+            pending = Request(quiet: quiet)
         }
     }
 

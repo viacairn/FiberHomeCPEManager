@@ -17,6 +17,7 @@ final class FakeCPE: @unchecked Sendable {
     private let seed = "hU3S9"
     private let sessionID = String((0..<64).map { _ in "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ".randomElement()! })
     private var loginAccepted = false
+    private var rejectLogins = false
     private var requests: [String] = []
 
     let port: UInt16
@@ -29,6 +30,8 @@ final class FakeCPE: @unchecked Sendable {
     }
     private let logBox = LogBox()
     var log: [String] { logBox.snapshot }
+    func requestCount(_ method: String) -> Int { queue.sync { requests.filter { $0 == method }.count } }
+    func refuseSubsequentLogins() { queue.sync { rejectLogins = true } }
     private var onRequestStorage: (@Sendable (String) -> Void)?
     var onRequest: (@Sendable (String) -> Void)? {
         get { onRequestStorage }
@@ -170,8 +173,9 @@ final class FakeCPE: @unchecked Sendable {
             if method == "DO_WEB_LOGIN" {
                 let user = object["dataObj"]["username"].text
                 let pass = object["dataObj"]["password"].text
-                let ok = user == "admin" && pass == "test-password"
+                let ok = user == "admin" && pass == "test-password" && !rejectLogins
                 loginAccepted = ok
+                if ok { sessionExpired = false }
                 return json(["result": ok ? "0" : "1"])
             }
             return json(["result": "0"])

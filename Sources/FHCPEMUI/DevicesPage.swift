@@ -10,19 +10,27 @@ public struct DevicesPage: View {
     @Binding public var filter: AccessFilter
     public let onReload: () -> Void
     public let onReserveIP: (@MainActor (ConnectedDevice, String) async throws -> Void)?
+    public let onRemoveReservation: (@MainActor (ConnectedDevice) async throws -> Void)?
+    public let reservations: [DHCPReservation]
+    @Environment(\.appNotices) private var notices
+    @State private var removingReservation = false
     @State private var glyphs = DeviceGlyphStore()
-    @State private var glyphEntries: [String: DeviceGlyphStore.Entry] = [:]
+    @State private var glyphEntries: [String: DeviceGlyph] = [:]
     @State private var editingDevice: ConnectedDevice?
     @State private var filterMenuOpen = false
 
     public init(devices: [ConnectedDevice], isLive: Bool,
                 query: Binding<String>, filter: Binding<AccessFilter>,
                 onReload: @escaping () -> Void = {},
-                onReserveIP: (@MainActor (ConnectedDevice, String) async throws -> Void)? = nil) {
+                onReserveIP: (@MainActor (ConnectedDevice, String) async throws -> Void)? = nil,
+                onRemoveReservation: (@MainActor (ConnectedDevice) async throws -> Void)? = nil,
+                reservations: [DHCPReservation] = []) {
         self.devices = devices; self.isLive = isLive
         self._query = query; self._filter = filter
         self.onReload = onReload
         self.onReserveIP = onReserveIP
+        self.onRemoveReservation = onRemoveReservation
+        self.reservations = reservations
     }
 
     public enum AccessFilter: String, CaseIterable, Identifiable, Sendable {
@@ -196,7 +204,8 @@ public struct DevicesPage: View {
                 Panel(padding: 6, spacing: 0) {
                     ForEach(shown) { device in
                         DeviceRow(device: device,
-                                  symbol: glyphs.glyph(for: device, in: glyphEntries)?.symbol ?? device.systemSymbol)
+                                  symbol: glyphs.glyph(for: device, in: glyphEntries)?.symbol ?? device.systemSymbol,
+                                  isReserved: isReserved(device))
                             .accessibilityHidden(true)
                             .overlay {
                                 DeviceContextMenu(
@@ -207,7 +216,10 @@ public struct DevicesPage: View {
                                     onGlyph: { device, glyph in
                                         glyphs.assign(glyph, to: device)
                                         glyphEntries = glyphs.all()
-                                    })
+                                    },
+                                    isReserved: isReserved(device),
+                                    canRemoveReservation: onRemoveReservation != nil && !removingReservation,
+                                    onRemove: removeReservation)
                             }
                         if device.id != shown.last?.id {
                             Rectangle()
@@ -232,8 +244,28 @@ public struct DevicesPage: View {
     }
 
     private func loadGlyphAssignments() {
-        glyphs.prune(keeping: devices)
         glyphEntries = glyphs.all()
+    }
+
+    private func isReserved(_ device: ConnectedDevice) -> Bool {
+        guard let mac = device.mac else { return false }
+        let normalized = mac.trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "-", with: ":").uppercased()
+        return reservations.contains { $0.mac == normalized }
+    }
+
+    private func removeReservation(_ device: ConnectedDevice) {
+        guard isLive, !removingReservation, let onRemoveReservation else { return }
+        removingReservation = true
+        Task { @MainActor in
+            defer { removingReservation = false }
+            do {
+                try await onRemoveReservation(device)
+            } catch {
+                guard !(error is CancellationError), error as? CPEError != .authentication else { return }
+                notices?.show(error.localizedDescription, tone: .error)
+            }
+        }
     }
 
     private var emptyState: some View {
@@ -356,9 +388,9 @@ private struct DHCPReservationEditor: View {
             defer { saving = false }
             do {
                 try await onSave(device, ip.trimmingCharacters(in: .whitespacesAndNewlines))
-                notices?.show("已保存固定 IP 绑定", tone: .success)
                 dismiss()
             } catch {
+                guard !(error is CancellationError), error as? CPEError != .authentication else { return }
                 saveError = error.localizedDescription
             }
         }
@@ -368,6 +400,7 @@ private struct DHCPReservationEditor: View {
 private struct DeviceRow: View {
     let device: ConnectedDevice
     let symbol: String
+    let isReserved: Bool
     @State private var hovering = false
 
     var body: some View {
@@ -386,10 +419,21 @@ private struct DeviceRow: View {
                     .foregroundStyle(style.foreground)
             }
             VStack(alignment: .leading, spacing: 2) {
-                Text(device.name)
-                    .font(.system(size: 12.5, weight: .semibold))
-                    .foregroundStyle(.primary)
-                    .lineLimit(1)
+                HStack(spacing: 5) {
+                    Text(device.name)
+                        .font(.system(size: 12.5, weight: .semibold))
+                        .foregroundStyle(.primary)
+                        .lineLimit(1)
+                    if isReserved {
+                        Label("固定 IP", systemImage: "pin.fill")
+                            .font(.system(size: 8, weight: .semibold))
+                            .foregroundStyle(Color.accentColor)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 2)
+                            .background(Color.accentColor.opacity(0.10), in: Capsule())
+                            .fixedSize()
+                    }
+                }
                 HStack(spacing: 4) {
                     Text(device.ip)
                         .font(.system(size: 10.5, weight: .medium).monospacedDigit())
@@ -484,10 +528,7 @@ private struct DeviceRow: View {
     /// Compact online duration: `12 分` / `3 小时` / `2 天`.
     static func onlineText(_ seconds: TimeInterval?) -> String? {
         guard let seconds, seconds > 0 else { return nil }
-        let total = Int(seconds)
-        let days = total / 86_400, hours = (total % 86_400) / 3_600, minutes = (total % 3_600) / 60
-        if days > 0 { return "\(days) 天" }
-        if hours > 0 { return "\(hours) 小时" }
-        return "\(minutes) 分"
+        return MetricFormatter.formatDuration(seconds)?
+            .split(separator: " ").prefix(2).joined(separator: " ")
     }
 }

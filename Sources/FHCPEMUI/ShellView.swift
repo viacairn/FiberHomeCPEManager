@@ -33,11 +33,6 @@ public struct ShellView: View {
                 .padding(.top, model.route == .about ? Theme.topInset
                          : Theme.topInset + Theme.globalTitleHeight + Theme.globalTitleGap)
         }
-        .onChange(of: model.data.isLive) { wasLive, live in
-            if wasLive && !live, model.statusMessage == nil, model.connectError == nil {
-                model.notices.show("连接已断开，请重新连接设备", tone: .error)
-            }
-        }
         .animation(nil, value: model.tab)
         .animation(nil, value: model.route)
         .animation(nil, value: model.smsRoute)
@@ -51,6 +46,11 @@ public struct ShellView: View {
             .ignoresSafeArea()
         )
         .environment(\.appNotices, model.notices)
+        .onReceive(NotificationCenter.default.publisher(for: .firmwareRowsSkipped).receive(on: RunLoop.main)) { notification in
+            if let message = notification.userInfo?["message"] as? String {
+                model.notices.show(message, tone: .info)
+            }
+        }
     }
 
     private var content: some View {
@@ -74,13 +74,19 @@ public struct ShellView: View {
         .onChange(of: model.tab) { _, tab in
             // Tab entry requests a quiet read; the independent three-second sampler
             // never switches the controls into a user-write busy state.
+            if tab == 1, model.route == .main { model.onDevicesSelected() }
             if tab == 2, model.route == .main { model.onControlsSelected() }
             if tab == 3, model.route == .main { model.onSMSSelected() }
         }
     }
 
     @ViewBuilder private var navigatedCanvas: some View {
-        if #available(macOS 26.0, *) {
+        if model.rebooting {
+            VStack(spacing: Theme.tabBarGap) {
+                titledCanvas.frame(maxWidth: .infinity, maxHeight: .infinity)
+                navigationBar
+            }
+        } else if #available(macOS 26.0, *) {
             titledCanvas
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .safeAreaBar(edge: .bottom, spacing: Theme.tabBarGap) { navigationBar }
@@ -95,6 +101,12 @@ public struct ShellView: View {
     @ViewBuilder private var titledCanvas: some View {
         if model.route == .about {
             canvas.padding(.top, Theme.topInset)
+        } else if model.rebooting {
+            // Plain waiting states have no scroll view to consume a safe-area bar.
+            VStack(spacing: Theme.globalTitleGap) {
+                titleBar
+                canvas.frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
         } else if #available(macOS 26.0, *) {
             protectedCanvas.safeAreaBar(edge: .top, spacing: Theme.globalTitleGap) {
                 titleBar
@@ -181,21 +193,9 @@ public struct ShellView: View {
             case .about:
                 AboutPage(onBack: model.closeAbout)
             case .ddns:
-                DDNSPage(entries: model.data.isLive ? model.ddnsEntries : [],
-                         wans: model.data.isLive ? model.wanConnections : [],
-                         busy: model.advancedBusy, isLive: model.data.isLive,
-                         status: model.advancedStatus, statusIsError: model.advancedStatusIsError,
-                         onBack: model.closeDDNS, onReload: model.reloadDDNS,
-                         onSave: model.saveDDNS, onDelete: model.deleteDDNS,
-                         onToggle: model.setDDNSEnabled)
+                DDNSPage(model: model)
             case .portMapping:
-                PortMappingPage(entries: model.data.isLive ? model.portMappings : [],
-                                wans: model.data.isLive ? model.wanConnections : [],
-                                busy: model.advancedBusy, isLive: model.data.isLive,
-                                status: model.advancedStatus, statusIsError: model.advancedStatusIsError,
-                                onBack: model.closePortMapping, onReload: model.reloadPortMappings,
-                                onAdd: model.addPortMapping, onDelete: model.deletePortMapping,
-                                onToggle: model.setPortMappingEnabled)
+                PortMappingPage(model: model)
             case .cellular:
                 CellularDetailPage(data: model.data, cells: model.data.isLive ? model.cells : [], lockMode: model.data.isLive ? model.lockMode : .unknown,
                                    lockBusy: model.lockBusy, onBack: model.closeCellular,
@@ -213,11 +213,11 @@ public struct ShellView: View {
                 case 1:
                     DevicesPage(devices: model.devices, isLive: model.data.isLive,
                                 query: $model.searchQuery, filter: $model.accessFilter,
-                                onReload: model.refreshNow, onReserveIP: model.reserveIP)
+                                onReload: model.refreshNow, onReserveIP: model.reserveIP,
+                                onRemoveReservation: model.removeReservation, reservations: model.reservations)
                 case 2:
                     ControlsPage(settings: model.data.isLive ? model.settings : nil,
-                                 busy: model.settingsBusy, status: model.settingsStatus,
-                                 statusIsError: model.settingsStatusIsError,
+                                 busy: model.settingsBusy,
                                  isLive: model.data.isLive,
                                  onToggleSSID: model.toggleSSID,
                                  onRenameSSID: model.renameSSID,
@@ -233,12 +233,12 @@ public struct ShellView: View {
                                  ddnsCount: model.data.isLive && model.ddnsLoaded ? model.ddnsEntries.count : nil,
                                  portMappingCount: model.data.isLive && model.portMappingsLoaded ? model.portMappings.count : nil,
                                  onOpenDDNS: model.openDDNS,
-                                 onOpenPortMapping: model.openPortMapping)
+                                 onOpenPortMapping: model.openPortMapping,
+                                 onRebootDevice: model.rebootDevice, rebooting: model.rebooting)
                 case 3:
                     SMSPage(threads: model.threads, route: model.smsRoute,
                             selectedThread: model.threads.first { $0.id == model.selectedThreadID },
-                            busy: model.smsBusy, status: model.smsStatus,
-                            statusIsError: model.smsStatusIsError,
+                            busy: model.smsBusy,
                             lastSync: model.smsLastSync, isLive: model.data.isLive,
                             draftNumber: $model.draftNumber, draftBody: $model.draftBody,
                             replyBody: $model.replyBody,
@@ -286,20 +286,25 @@ public struct ShellView: View {
     public let notices = AppNoticeCenter()
     public var route: ShellView.Route
     public var tab: Int
-    public var data: PageData {
-        didSet { if !data.isLive { clearVolatilePages() } }
-    }
+    public var data: PageData
+    public var rebooting = false
+    public var rebootDevice: () -> Void = {}
+    public var reservations: [DHCPReservation] = []
+    public var removeReservation: (@MainActor (ConnectedDevice) async throws -> Void)?
+    public var ddnsEditorPresented = false
+    public var portMappingEditorPresented = false
+    var ddnsDraft = DDNSDraft()
+    var portMappingDraft = PortMappingDraft()
+    var editingDDNS: DDNSEntry?
+    var editingPortMapping: PortMappingEntry?
+    public var advancedSaving = false
+    @ObservationIgnored var advancedTask: Task<Void, Never>?
     public var devices: [ConnectedDevice]
     public var cells: [CellRecord]
     public var lockMode: LockMode
     public var lockBusy = false
     public var radioLocks: RadioLockState?
-    public var lockStatus: String? {
-        didSet { if lockStatus != oldValue { notices.enqueueStatus(lockStatus, source: "lock", tone: lockStatusIsError ? .error : .success) } }
-    }
-    public var lockStatusIsError = false {
-        didSet { notices.updateStatusTone(source: "lock", tone: lockStatusIsError ? .error : .success) }
-    }
+
     /// Which segment the cellular page opens on (renderer/test seam).
     public var cellularTab = 0
     public var busy = false
@@ -311,12 +316,7 @@ public struct ShellView: View {
     public var ddnsLoaded = false
     public var portMappingsLoaded = false
     public var advancedBusy = false
-    public var advancedStatus: String? {
-        didSet { if advancedStatus != oldValue { notices.enqueueStatus(advancedStatus, source: "advanced", tone: advancedStatusIsError ? .error : .success) } }
-    }
-    public var advancedStatusIsError = false {
-        didSet { notices.updateStatusTone(source: "advanced", tone: advancedStatusIsError ? .error : .success) }
-    }
+
 
     public var draftAddress: String
     public var draftUsername: String
@@ -325,18 +325,9 @@ public struct ShellView: View {
     public var menuBarStyle: MenuBarStyle = .default
     /// Bare host of the connected device.
     public var lanAddress: String = ""
-    public var connectError: String? {
-        didSet { if connectError != oldValue { notices.enqueueStatus(connectError, source: "connect", tone: .error) } }
-    }
-    /// Transient feedback delivered by the shell's notification bubbles.
-    public var statusMessage: String? {
-        didSet {
-            if statusMessage != oldValue {
-                let error = statusMessage.map { $0.hasPrefix("未能") || $0.hasPrefix("无法") || $0.hasPrefix("连接已断开") } == true
-                notices.enqueueStatus(statusMessage, source: "status", tone: error ? .error : .info)
-            }
-        }
-    }
+    public var connectError: String?
+    /// Connection progress shown while the device is temporarily unavailable.
+    public var statusMessage: String?
 
     public var searchQuery = ""
     public var accessFilter: DevicesPage.AccessFilter = .all
@@ -348,28 +339,12 @@ public struct ShellView: View {
     /// Settings hub state.
     public var settings: DeviceSettings?
     public var settingsBusy = false
-    public var settingsStatus: String? {
-        didSet { if settingsStatus != oldValue { notices.enqueueStatus(settingsStatus, source: "settings", tone: settingsNoticeTone) } }
-    }
-    public var settingsStatusIsError = false {
-        didSet { notices.updateStatusTone(source: "settings", tone: settingsNoticeTone) }
-    }
-    private var settingsNoticeTone: AppNoticeTone {
-        if settingsStatusIsError { return .error }
-        if settingsStatus?.hasPrefix("正在") == true || settingsStatus?.hasPrefix("切换中") == true { return .info }
-        return .success
-    }
     /// The mode being switched to, shown as a spinner on its card.
     public var uplinkSwitchTarget: UplinkTarget?
     public var switchUplink: (UplinkTarget) -> Void = { _ in }
     public var draftNumber = ""
     public var draftBody = ""
-    public var smsStatus: String? {
-        didSet { if smsStatus != oldValue { notices.enqueueStatus(smsStatus, source: "sms", tone: smsStatusIsError ? .error : .success) } }
-    }
-    public var smsStatusIsError = false {
-        didSet { notices.updateStatusTone(source: "sms", tone: smsStatusIsError ? .error : .success) }
-    }
+
     /// Last successful get_sms_data read; shown as a subtle sync stamp on the SMS list.
     public var smsLastSync: Date?
 
@@ -391,6 +366,7 @@ public struct ShellView: View {
     public var closePortMapping: () -> Void = {}
     public var reloadPortMappings: () -> Void = {}
     public var addPortMapping: (PortMappingInput) async throws -> Void = { _ in throw CPEError.authentication }
+    public var updatePortMapping: (PortMappingEntry, PortMappingInput) async throws -> Void = { _, _ in throw CPEError.authentication }
     public var deletePortMapping: (PortMappingEntry) async throws -> Void = { _ in throw CPEError.authentication }
     public var setPortMappingEnabled: (PortMappingEntry, Bool) async throws -> Void = { _, _ in throw CPEError.authentication }
     public var setCellLockEnabled: (Bool) -> Void = { _ in }
@@ -418,6 +394,7 @@ public struct ShellView: View {
     public var saveFan: (FanMode) -> Void = { _ in }
     /// Fired when the controls tab becomes visible, so settings are read on entry rather
     /// than on every 1 Hz traffic refresh.
+    public var onDevicesSelected: () -> Void = {}
     public var onControlsSelected: () -> Void = {}
     /// Fired when the SMS tab becomes visible, so the first get_sms_data read is immediate.
     public var onSMSSelected: () -> Void = {}
@@ -432,21 +409,22 @@ public struct ShellView: View {
         self.cells = cells; self.lockMode = lockMode
         self.draftAddress = address; self.draftUsername = username; self.draftPassword = password
         self.menuBarStyle = menuBarStyle
-        if !data.isLive { clearVolatilePages() }
+
     }
 
-    /// Device-derived values and SMS drafts belong to one live connection, in memory.
-    /// Reset every page together so no navigation path can expose an old reading.
-    private func clearVolatilePages() {
+    /// Explicit disconnect/router changes reset drafts; stale samples never do.
+    public func resetSession() {
+        advancedTask?.cancel(); advancedTask = nil
+        data = PageData(snapshot: nil)
         devices = []; cells = []; settings = nil; radioLocks = nil; lockMode = .unknown
         threads = []; selectedThreadID = nil; smsRoute = .threads; smsLastSync = nil
         draftNumber = ""; draftBody = ""; replyBody = ""
         smsBusy = false; settingsBusy = false; lockBusy = false; uplinkSwitchTarget = nil
-        smsStatus = nil; smsStatusIsError = false
-        settingsStatus = nil; settingsStatusIsError = false
-        lockStatus = nil; lockStatusIsError = false
+        rebooting = false
         mobileNetwork = nil; wanConnections = []; ddnsEntries = []; portMappings = []
+        reservations = []
         ddnsLoaded = false; portMappingsLoaded = false
-        advancedBusy = false; advancedStatus = nil; advancedStatusIsError = false
+        advancedBusy = false; advancedSaving = false
+        dismissDDNSEditor(); dismissPortMappingEditor()
     }
 }

@@ -16,9 +16,6 @@ public struct AppNotice: Identifiable {
 @MainActor @Observable public final class AppNoticeCenter {
     public private(set) var notices: [AppNotice] = []
     @ObservationIgnored private var expiryTask: Task<Void, Never>?
-    @ObservationIgnored private var deliveryTask: Task<Void, Never>?
-    @ObservationIgnored private var pendingStatuses: [PendingStatus] = []
-    @ObservationIgnored private var latestStatus: [String: UUID] = [:]
     @ObservationIgnored private let now: () -> TimeInterval
     @ObservationIgnored private let lifetime: TimeInterval
     @ObservationIgnored private let automaticDismissal: Bool
@@ -30,40 +27,7 @@ public struct AppNotice: Identifiable {
         self.lifetime = lifetime; self.now = now; self.automaticDismissal = automaticDismissal
     }
 
-    private struct PendingStatus {
-        let id: UUID
-        let message: String
-        var tone: AppNoticeTone
-    }
-
-    deinit { expiryTask?.cancel(); deliveryTask?.cancel() }
-
-    /// Capture events even when a following quiet read clears the status before the
-    /// next SwiftUI frame. The adjacent tone assignment finishes the same event.
-    func enqueueStatus(_ message: String?, source: String, tone: AppNoticeTone) {
-        guard let message else { latestStatus[source] = nil; return }
-        let id = UUID()
-        latestStatus[source] = id
-        pendingStatuses.append(PendingStatus(id: id, message: message, tone: tone))
-        guard deliveryTask == nil else { return }
-        deliveryTask = Task { [weak self] in
-            await Task.yield()
-            guard !Task.isCancelled else { return }
-            self?.deliverStatuses()
-        }
-    }
-
-    func updateStatusTone(source: String, tone: AppNoticeTone) {
-        guard let id = latestStatus[source], let index = pendingStatuses.firstIndex(where: { $0.id == id }) else { return }
-        pendingStatuses[index].tone = tone
-    }
-
-    func deliverStatuses() {
-        deliveryTask?.cancel(); deliveryTask = nil
-        let statuses = pendingStatuses
-        pendingStatuses = []; latestStatus = [:]
-        for status in statuses { show(status.message, tone: status.tone) }
-    }
+    deinit { expiryTask?.cancel() }
 
     public func show(_ message: String, tone: AppNoticeTone = .info,
                      actionTitle: String? = nil, action: (@MainActor () -> Void)? = nil) {

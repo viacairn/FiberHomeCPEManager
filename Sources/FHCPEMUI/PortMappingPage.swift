@@ -2,119 +2,61 @@ import SwiftUI
 import FHCPECore
 
 public struct PortMappingPage: View {
-    public let entries: [PortMappingEntry]
-    public let wans: [WANConnectionRef]
-    public let busy: Bool
-    public let isLive: Bool
-    public let status: String?
-    public let statusIsError: Bool
-    public let onBack: () -> Void
-    public let onReload: () -> Void
-    public let onAdd: (PortMappingInput) async throws -> Void
-    public let onDelete: (PortMappingEntry) async throws -> Void
-    public let onToggle: (PortMappingEntry, Bool) async throws -> Void
-
-    public init(entries: [PortMappingEntry], wans: [WANConnectionRef], busy: Bool,
-                isLive: Bool = true, status: String?, statusIsError: Bool,
-                onBack: @escaping () -> Void, onReload: @escaping () -> Void,
-                onAdd: @escaping (PortMappingInput) async throws -> Void,
-                onDelete: @escaping (PortMappingEntry) async throws -> Void,
-                onToggle: @escaping (PortMappingEntry, Bool) async throws -> Void) {
-        self.entries = entries; self.wans = wans; self.busy = busy; self.isLive = isLive
-        self.status = status; self.statusIsError = statusIsError
-        self.onBack = onBack; self.onReload = onReload
-        self.onAdd = onAdd; self.onDelete = onDelete; self.onToggle = onToggle
-    }
-
-    @State private var pageActive = true
-    @State private var mutationToken: UUID?
-    @State private var mutationTask: Task<Void, Never>?
-    @State private var showingAdd = false
+    @Bindable public var model: ShellModel
     @State private var deletingID: String?
-    @State private var draft = PortMappingDraft()
-    @State private var rowError: String?
-    @State private var formError: String?
+    public init(model: ShellModel) { self.model = model }
 
-    private var working: Bool { busy || mutationToken != nil }
-    private var canWrite: Bool { isLive && pageActive && !working }
-    private var canOpenAction: Bool { canWrite && !showingAdd && deletingID == nil }
+    private var entries: [PortMappingEntry] { model.portMappings }
+    private var wans: [WANConnectionRef] { model.wanConnections }
+    private var busy: Bool { model.advancedBusy || model.advancedSaving }
+    private var isLive: Bool { model.data.isLive }
+    private var canWrite: Bool { isLive && !busy }
+    private var canOpenAction: Bool { canWrite && !model.portMappingEditorPresented && deletingID == nil }
     private var availableWANs: [WANConnectionRef] {
-        wans.filter { wan in
-            entries.filter { $0.wan.id == wan.id }.count < PortMappingService.maxEntriesPerWAN
-        }
+        wans.filter { wan in entries.filter { $0.wan.id == wan.id }.count < PortMappingService.maxEntriesPerWAN }
     }
     private var canAdd: Bool { canOpenAction && !availableWANs.isEmpty }
-    private var editorInput: PortMappingInput? { draft.input(wans: availableWANs) }
+    private var editorWANs: [WANConnectionRef] { model.editingPortMapping == nil ? availableWANs : wans }
+    private var editorInput: PortMappingInput? { model.portMappingDraft.input(wans: editorWANs) }
     private var validationError: String? {
-        guard let input = editorInput else {
-            return availableWANs.contains(where: { $0.id == draft.wanID })
-                ? "请填写内网 IP 和完整的端口范围。" : "未读取到可用的 WAN 连接。"
-        }
-        if let error = input.validationError { return error }
-        // The stock page checks every rule on the same WAN device, including disabled
-        // rules and other protocols. The service repeats this check before writing.
-        if entries.contains(where: {
-            $0.wan.device == input.wan.device &&
-            $0.externalPort <= input.externalEnd && input.externalPort <= $0.externalEnd
-        }) {
-            return "外部端口范围与现有规则重叠。"
-        }
-        return nil
+        guard let input = editorInput else { return "请填写完整配置并选择可用的 WAN 连接。" }
+        return input.validationError
     }
 
     public var body: some View {
         VStack(spacing: 0) {
             SubpageBar(title: "端口映射", actionSymbol: canAdd ? "plus" : nil,
-                       actionLabel: "添加端口映射", onAction: presentAdd, onBack: leavePage)
-            if isLive {
-                onlineContent
-            } else {
-                AdvancedSettingsDisconnectedState()
-            }
+                       actionLabel: "添加端口映射", onAction: { model.presentPortMappingEditor(nil) },
+                       onBack: model.closePortMapping)
+            if isLive { onlineContent } else { AdvancedSettingsDisconnectedState() }
         }
-        .sheet(isPresented: editorPresentation, onDismiss: clearEditor) {
-            if isLive {
-                PortMappingForm(draft: $draft, wans: availableWANs, locked: working,
-                                saving: mutationToken != nil, error: formError ?? validationError,
-                                canSave: canWrite && editorInput != nil && validationError == nil,
-                                onCancel: clearEditor, onSave: saveEditor)
-            }
+        .sheet(isPresented: $model.portMappingEditorPresented, onDismiss: model.dismissPortMappingEditor) {
+            PortMappingForm(draft: $model.portMappingDraft, wans: editorWANs, devices: model.devices,
+                            editing: model.editingPortMapping != nil, locked: busy, saving: model.advancedSaving,
+                     error: isLive ? validationError : "连接暂时中断，恢复后可继续保存。",
+                     canSave: canWrite && validationError == nil,
+                     onCancel: model.dismissPortMappingEditor, onSave: saveEditor)
         }
-        .confirmationDialog("删除端口映射？", isPresented: deletionPresentation,
-                            titleVisibility: .visible, presenting: deletingID) { id in
-            Button("删除", role: .destructive) { confirmDelete(id) }
-                .disabled(!canWrite)
+        .confirmationDialog("删除端口映射？", isPresented: Binding(
+            get: { deletingID != nil }, set: { if !$0 { deletingID = nil } }),
+            titleVisibility: .visible) {
+            Button("删除", role: .destructive) {
+                guard let entry = entries.first(where: { $0.id == deletingID }) else { return }
+                deletingID = nil
+                model.performAdvancedMutation { try await model.deletePortMapping(entry) }
+            }
+            .disabled(!canWrite)
             Button("取消", role: .cancel) { deletingID = nil }
-        } message: { _ in
-            Text("将删除这条端口映射规则。")
         }
-        .onAppear {
-            pageActive = isLive
-            if !isLive { invalidatePage() }
-        }
-        .onChange(of: isLive) { _, live in
-            invalidatePage()
-            pageActive = live
-        }
-        .onChange(of: entries) { _, _ in
-            rowError = nil
-            if showingAdd, !availableWANs.contains(where: { $0.id == draft.wanID }) { clearEditor() }
-            if let deletingID, !entries.contains(where: { $0.id == deletingID }) { self.deletingID = nil }
-        }
-        .onChange(of: wans) { _, _ in
-            if showingAdd, !availableWANs.contains(where: { $0.id == draft.wanID }) { clearEditor() }
-            deletingID = nil
-        }
-        .onDisappear { invalidatePage() }
-        .appReminder(rowError)
     }
 
-    private var editorPresentation: Binding<Bool> {
-        Binding(get: { isLive && showingAdd }, set: { if !$0 { clearEditor() } })
-    }
-
-    private var deletionPresentation: Binding<Bool> {
-        Binding(get: { isLive && deletingID != nil }, set: { if !$0 { deletingID = nil } })
+    private func saveEditor() {
+        guard canWrite, validationError == nil, let input = editorInput else { return }
+        let entry = model.editingPortMapping
+        model.performAdvancedMutation({
+            if let entry { try await model.updatePortMapping(entry, input) }
+            else { try await model.addPortMapping(input) }
+        }, onSuccess: model.dismissPortMappingEditor)
     }
 
     private var onlineContent: some View {
@@ -171,6 +113,7 @@ public struct PortMappingPage: View {
 
     private func row(_ entry: PortMappingEntry) -> some View {
         HStack(spacing: 8) {
+            Button { model.presentPortMappingEditor(entry) } label: {
             VStack(alignment: .leading, spacing: 2) {
                 Text(entry.localIP)
                     .font(.system(size: 11.5, weight: .semibold).monospacedDigit())
@@ -185,12 +128,17 @@ public struct PortMappingPage: View {
                     .lineLimit(1)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .disabled(!canOpenAction || !knowsWAN(entry))
+            .accessibilityLabel("编辑端口映射 \(entry.localIP)")
 
             Toggle("端口映射启用", isOn: Binding(
                 get: { entry.enabled },
                 set: { value in
                     guard canOpenAction, knowsWAN(entry) else { return }
-                    mutate(fromEditor: false) { try await onToggle(entry, value) }
+                    model.performAdvancedMutation { try await model.setPortMappingEnabled(entry, value) }
                 }
             ))
             .labelsHidden()
@@ -218,94 +166,13 @@ public struct PortMappingPage: View {
         .padding(.vertical, 5)
     }
 
-    private func presentAdd() {
-        guard canAdd else { return }
-        draft = PortMappingDraft(wans: availableWANs)
-        formError = nil
-        showingAdd = true
-    }
-
-    private func saveEditor() {
-        guard showingAdd, canWrite, let input = editorInput, validationError == nil else { return }
-        mutate(fromEditor: true) { try await onAdd(input) }
-    }
-
-    private func confirmDelete(_ id: String) {
-        guard canWrite,
-              let entry = entries.first(where: { $0.id == id }), knowsWAN(entry) else {
-            self.deletingID = nil
-            return
-        }
-        self.deletingID = nil
-        mutate(fromEditor: false) { try await onDelete(entry) }
-    }
-
-    private func mutate(fromEditor: Bool, _ action: @escaping () async throws -> Void) {
-        guard canWrite else { return }
-        let token = UUID()
-        mutationToken = token
-        rowError = nil; formError = nil
-        mutationTask = Task { @MainActor in
-            do {
-                guard pageActive, mutationToken == token, !Task.isCancelled else { return }
-                try await action()
-                guard pageActive, mutationToken == token, !Task.isCancelled else { return }
-                mutationToken = nil; mutationTask = nil
-                if fromEditor { clearEditor() }
-                onReload()
-            } catch {
-                guard pageActive, mutationToken == token, !Task.isCancelled else { return }
-                mutationToken = nil; mutationTask = nil
-                if fromEditor { formError = error.localizedDescription }
-                else { rowError = error.localizedDescription }
-            }
-        }
-    }
-
-    private func clearEditor() {
-        showingAdd = false
-        draft = PortMappingDraft(); formError = nil
-    }
-
-    private func invalidatePage() {
-        pageActive = false; mutationToken = nil
-        mutationTask?.cancel(); mutationTask = nil
-        clearEditor()
-        deletingID = nil; rowError = nil
-    }
-
-    private func leavePage() {
-        invalidatePage()
-        onBack()
-    }
-}
-
-private struct PortMappingDraft {
-    var wanID = ""
-    var localIP = ""
-    var internalPort = ""
-    var internalEnd = ""
-    var externalPort = ""
-    var externalEnd = ""
-    var proto: PortMappingProtocol = .tcp
-    var enabled = false
-
-    init(wans: [WANConnectionRef] = []) { wanID = wans.first?.id ?? "" }
-
-    func input(wans: [WANConnectionRef]) -> PortMappingInput? {
-        guard let wan = wans.first(where: { $0.id == wanID }),
-              let firstInternal = Int(internalPort), let lastInternal = Int(internalEnd),
-              let firstExternal = Int(externalPort), let lastExternal = Int(externalEnd) else { return nil }
-        return PortMappingInput(wan: wan, localIP: localIP,
-                                internalPort: firstInternal, internalEnd: lastInternal,
-                                externalPort: firstExternal, externalEnd: lastExternal,
-                                proto: proto, enabled: enabled)
-    }
 }
 
 private struct PortMappingForm: View {
     @Binding var draft: PortMappingDraft
     let wans: [WANConnectionRef]
+    let devices: [ConnectedDevice]
+    let editing: Bool
     let locked: Bool
     let saving: Bool
     let error: String?
@@ -313,19 +180,33 @@ private struct PortMappingForm: View {
     let onCancel: () -> Void
     let onSave: () -> Void
 
+    private var onlineDevices: [ConnectedDevice] {
+        devices.filter { !$0.ip.isEmpty && $0.ip != "—" }
+    }
+
     var body: some View {
         ScrollView(.vertical) {
             VStack(alignment: .leading, spacing: 10) {
-                Text("添加端口映射")
+                Text(editing ? "编辑端口映射" : "添加端口映射")
                     .font(.system(size: 14, weight: .bold))
                 field("WAN") {
                     Picker("WAN", selection: $draft.wanID) {
                         ForEach(wans) { wan in Text(wan.title).tag(wan.id) }
                     }
-                    .labelsHidden().disabled(locked)
+                    .labelsHidden().disabled(locked || editing)
                 }
                 field("内网 IP") {
-                    PanelTextField(text: $draft.localIP, placeholder: "192.168.8.120").disabled(locked)
+                    HStack(spacing: 6) {
+                        PanelTextField(text: $draft.localIP, placeholder: "192.168.8.120").disabled(locked)
+                        Menu {
+                            ForEach(onlineDevices) { device in
+                                Button("\(device.name) · \(device.ip)") { draft.localIP = device.ip }
+                            }
+                        } label: { Image(systemName: "desktopcomputer") }
+                        .menuStyle(.borderlessButton).frame(width: 24)
+                        .disabled(locked || onlineDevices.isEmpty)
+                        .help("从在线设备选择 IP")
+                    }
                 }
                 HStack(spacing: 8) {
                     field("内部端口") {
@@ -336,8 +217,8 @@ private struct PortMappingForm: View {
                     }
                 }
                 HStack(spacing: 8) {
-                    field("外部端口") {
-                        PanelTextField(text: $draft.externalPort, placeholder: "18080").disabled(locked)
+                    field("外部起始端口") {
+                        PanelTextField(text: Binding(get: { draft.externalPort }, set: { draft.setExternalPort($0) }), placeholder: "18080").disabled(locked)
                     }
                     field("结束") {
                         PanelTextField(text: $draft.externalEnd, placeholder: "18080").disabled(locked)
@@ -355,6 +236,11 @@ private struct PortMappingForm: View {
                     .toggleStyle(.checkbox)
                     .font(.system(size: 11))
                     .disabled(locked)
+                if let error {
+                    Text(error).font(.system(size: 10.5))
+                        .foregroundStyle(Theme.inkSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 HStack(spacing: 8) {
                     Button("取消", action: onCancel)
                         .buttonStyle(.plain)
@@ -378,7 +264,6 @@ private struct PortMappingForm: View {
         .frame(width: Theme.compactWidth - 32)
         .frame(maxHeight: Theme.canvasHeight)
         .interactiveDismissDisabled(saving)
-        .appReminder(error)
         .appNoticeOverlay(top: 36)
     }
 

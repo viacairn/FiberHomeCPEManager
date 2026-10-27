@@ -104,7 +104,7 @@ struct UIRender {
                 let thread = fixtures.longNumberThread()
                 model.threads = [thread]; model.selectedThreadID = thread.id
             }
-            if name == "sms-error" { model.smsStatus = "短信读取失败：请求超时"; model.smsStatusIsError = true }
+            if name == "sms-error" { model.notices.show("短信读取失败：请求超时", tone: .error) }
             scenes.append((name, model))
         }
         for tab in [1, 2, 3] {
@@ -360,14 +360,12 @@ final class Renderer {
         }
         render("12-controls-error", width: Theme.compactWidth, height: Theme.compactHeight) {
             let model = fixtures.connected(tab: 2)
-            model.settingsStatus = "操作失败：设备返回 400（set_single_by_xmlnode 被拒绝）"
-            model.settingsStatusIsError = true
+            model.notices.show("操作失败：设备返回 400（set_single_by_xmlnode 被拒绝）", tone: .error)
             return ShellView(model: model)
         }
         render("13-sms-error", width: Theme.compactWidth, height: Theme.compactHeight) {
             let model = fixtures.connected(tab: 3)
-            model.smsStatus = "短信读取失败：请求超时"
-            model.smsStatusIsError = true
+            model.notices.show("短信读取失败：请求超时", tone: .error)
             return ShellView(model: model)
         }
         render("14-overview-ethernet-nocard", width: Theme.compactWidth, height: Theme.compactHeight) {
@@ -427,8 +425,7 @@ final class Renderer {
                 model.threads = fixtures.longThreads()
                 model.selectedThreadID = "10010"; model.smsRoute = .thread
                 if name == "29-sms-thread-status" {
-                    model.smsStatus = "短信读取失败：连接暂时中断，请重新连接设备后重试。"
-                    model.smsStatusIsError = true
+                    model.notices.show("短信读取失败：连接暂时中断，请重新连接设备后重试。", tone: .error)
                 }
                 return ShellView(model: model)
             }
@@ -443,6 +440,26 @@ final class Renderer {
             let model = fixtures.connected(tab: 0)
             model.notices.show("短信已发送", tone: .success)
             model.notices.show("连接已断开，请重新连接设备", tone: .error)
+            return ShellView(model: model)
+        }
+        render("32-band-chips", width: Theme.compactWidth, height: Theme.compactHeight,
+               scrollToBottom: true) {
+            let model = fixtures.connected(tab: 0)
+            model.route = .cellular
+            model.radioLocks = RadioLockState(lteBands: [1, 3, 8], nrBands: [41, 78])
+            return ShellView(model: model)
+        }
+        render("33-rebooting", width: Theme.compactWidth, height: Theme.compactHeight) {
+            let model = fixtures.connected(tab: 2)
+            model.data.connected = false
+            model.settings = nil
+            model.rebooting = true
+            return ShellView(model: model)
+        }
+        render("34-device-reservation", width: Theme.compactWidth, height: Theme.compactHeight) {
+            let model = fixtures.connected(tab: 1)
+            model.devices[0].mac = "02:00:00:00:00:10"
+            model.reservations = [try! DHCPReservation(mac: "02:00:00:00:00:10", ip: "192.168.8.101", index: 1)]
             return ShellView(model: model)
         }
     }

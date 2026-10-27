@@ -12,8 +12,6 @@ public struct SMSPage: View {
     public let route: Route
     public let selectedThread: SMSThread?
     public let busy: Bool
-    public let status: String?
-    public let statusIsError: Bool
     public let lastSync: Date?
     public let isLive: Bool
     @Binding public var draftNumber: String
@@ -29,7 +27,7 @@ public struct SMSPage: View {
     public let onSendReply: (SMSThread, String) -> Void
 
     public init(threads: [SMSThread], route: Route, selectedThread: SMSThread?,
-                busy: Bool, status: String?, statusIsError: Bool = false,
+                busy: Bool,
                 lastSync: Date? = nil, isLive: Bool = true,
                 draftNumber: Binding<String>, draftBody: Binding<String>,
                 replyBody: Binding<String>,
@@ -38,7 +36,7 @@ public struct SMSPage: View {
                 onCompose: @escaping () -> Void, onMarkRead: @escaping (SMSThread) -> Void,
                 onSendReply: @escaping (SMSThread, String) -> Void) {
         self.threads = threads; self.route = route; self.selectedThread = selectedThread
-        self.busy = busy; self.status = status; self.statusIsError = statusIsError
+        self.busy = busy;
         self.lastSync = lastSync; self.isLive = isLive
         self._draftNumber = draftNumber; self._draftBody = draftBody
         self._replyBody = replyBody

@@ -21,6 +21,6 @@ let package = Package(
         .executableTarget(name: "FHCPEMWidget", dependencies: ["FHCPECore"]),
         .executableTarget(name: "UIRender", dependencies: ["FHCPECore", "FHCPEMUI"]),
         .executableTarget(name: "FHCPEMProbe", dependencies: ["FHCPECore"]),
-        .testTarget(name: "FHCPECoreTests", dependencies: ["FHCPECore", "FHCPEMUI"])
+        .testTarget(name: "FHCPECoreTests", dependencies: ["FHCPECore", "FHCPEMUI", "FHCPEM"])
     ]
 )

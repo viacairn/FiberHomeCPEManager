@@ -5,15 +5,15 @@ import Foundation
 /// Records RPC calls so the settings write contract can be asserted without a device.
 final class RecordingRPC: DeviceRPC, @unchecked Sendable {
     private let lock = NSLock()
-    private var recorded: [(method: String, data: JSONValue)] = []
+    private var recorded: [(method: String, data: JSONValue, publicAccess: Bool)] = []
     var reply: JSONValue = .object(["success": .string("true")])
 
-    var calls: [(method: String, data: JSONValue)] {
+    var calls: [(method: String, data: JSONValue, publicAccess: Bool)] {
         lock.withLock { recorded }
     }
 
     func call(_ method: String, data: JSONValue, publicAccess: Bool) async throws -> JSONValue {
-        lock.withLock { recorded.append((method, data)) }
+        lock.withLock { recorded.append((method, data, publicAccess)) }
         return reply
     }
 }
@@ -70,7 +70,7 @@ struct SettingsWriteTests {
     @Test func rejectedReplyReportsFailure() async throws {
         let rpc = RecordingRPC()
         rpc.reply = .object(["success": .string("false")])
-        #expect(try await SettingsService(rpc: rpc).setLEDEnabled(true) == false)
+        await #expect(throws: CPEError.rejected) { try await SettingsService(rpc: rpc).setLEDEnabled(true) }
     }
 
     @Test func markReadUsesSingleNodeWrites() async throws {
@@ -85,18 +85,6 @@ struct SettingsWriteTests {
         #expect(rpc.calls.map { $0.data["value"].text } == ["1", "1"])
     }
 
-    @Test func lockBackendUsesSingleNodeWrites() async throws {
-        let rpc = RecordingRPC()
-        let backend = LG6851LockBackend(rpc: rpc)
-        try await backend.apply(.bands(lte: [3], nr: [78]))
-        #expect(rpc.calls.count == 3)
-        #expect(rpc.calls.allSatisfy { $0.method == "set_single_by_xmlnode" })
-        #expect(rpc.calls.map { $0.data["url"].text } == [
-            "X_FH_MobileNetwork.NetworkSettings.LTELockBAND",
-            "X_FH_MobileNetwork.NetworkSettings.LockBandEnable",
-            "X_FH_MobileNetwork.NetworkSettings.NRLockBAND"
-        ])
-    }
 
     @Test func settingsReadBatchesRequestsInsteadOfSequentialLoops() async throws {
         let rpc = RecordingRPC()
@@ -156,37 +144,56 @@ struct SettingsWriteTests {
     @Test func parseLockedCellsDecodesLiveChildNodeShape() {
         let payload: JSONValue = .object([
             "data": .array([
-                .object(["child_node_idx": .number(1), "act": .string("2"), "arfcn": .string("504990"), "pci": .string("524")]),
+                .object(["child_node_idx": .number(1), "act": .string("2"), "arfcn": .string("504990"), "pci": .string("3000")]),
                 .object(["child_node_idx": .number(2), "act": .string("2"), "arfcn": .string("152650"), "pci": .string("536")]),
                 .object(["child_node_idx": .number(3), "act": .string("1"), "arfcn": .string("1850"), "pci": .string("108")])
             ])
         ])
         let cells = LG6851Adapter.parseLockedCells(payload)
         #expect(cells == [
-            LockedCell(index: 1, act: 2, arfcn: 504990, pci: 524),
+            LockedCell(index: 1, act: 2, arfcn: 504990, pci: 3000),
             LockedCell(index: 2, act: 2, arfcn: 152650, pci: 536),
             LockedCell(index: 3, act: 1, arfcn: 1850, pci: 108)
         ])
-        #expect(cells[0].techTitle == "5G NR")
-        #expect(cells[2].techTitle == "4G LTE")
+        #expect(cells.first?.techTitle == "5G NR")
+        #expect(cells.last?.techTitle == "4G LTE")
     }
 
-    @Test func cellLockBackendAddsCandidateAndEnablesSwitch() async throws {
+
+    @Test func missingWriteAcknowledgementIsUncertain() async {
         let rpc = RecordingRPC()
-        let backend = LG6851LockBackend(rpc: rpc)
-        try await backend.apply(.cell(rat: 2, arfcn: 634464, pci: 101))
-        #expect(rpc.calls.map(\.method) == [
-            "get_xml_childnode_value",
-            "add_set_xmlnode",
-            "set_single_by_xmlnode"
-        ])
-        let addCall = rpc.calls[1]
-        #expect(addCall.data["url"].text == "X_FH_MobileNetwork.LockCellList.LockCell.")
-        #expect(addCall.data["setNode"]["value"]["act"].text == "2")
-        #expect(addCall.data["setNode"]["value"]["arfcn"].text == "634464")
-        #expect(addCall.data["setNode"]["value"]["pci"].text == "101")
-        let enableCall = rpc.calls[2]
-        #expect(enableCall.data["url"].text == "X_FH_MobileNetwork.LockCellList.LockEnable")
-        #expect(enableCall.data["value"].text == "1")
+        rpc.reply = .object([:])
+        await #expect(throws: CPEError.uncertain) { try await SettingsService(rpc: rpc).setLEDEnabled(true) }
     }
+
+    @Test func authenticationWriteReplyIsPropagated() async {
+        let rpc = RecordingRPC()
+        rpc.reply = .strings(["ERRORSTATUS": "418"])
+        await #expect(throws: CPEError.authentication) { try await SettingsService(rpc: rpc).setLEDEnabled(true) }
+    }
+
+    @Test func immediateRebootUsesTheVerifiedProtectedActionWithoutReadback() async throws {
+        let rpc = RecordingRPC()
+        #expect(try await SettingsService(rpc: rpc).rebootNow())
+        let call = try #require(rpc.calls.first)
+        #expect(rpc.calls.count == 1)
+        #expect(call.method == "device_reboot")
+        #expect(call.data == .null)
+        #expect(!call.publicAccess)
+    }
+
+    @Test func rejectedRebootDoesNotRetry() async {
+        let rpc = RecordingRPC()
+        rpc.reply = .strings(["success": "false"])
+        await #expect(throws: CPEError.rejected) { try await SettingsService(rpc: rpc).rebootNow() }
+        #expect(rpc.calls.count == 1)
+    }
+
+    @Test func rebootNeedsAnAcknowledgement() async {
+        let rpc = RecordingRPC()
+        rpc.reply = .object([:])
+        await #expect(throws: CPEError.uncertain) { try await SettingsService(rpc: rpc).rebootNow() }
+        #expect(rpc.calls.count == 1)
+    }
+
 }

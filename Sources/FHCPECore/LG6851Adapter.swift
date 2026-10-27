@@ -57,8 +57,7 @@ public struct LG6851Adapter: DeviceAdapter {
     }
 
     public func read(_ fields: [String: String]) async throws -> JSONValue {
-        guard !fields.isEmpty else { return .object([:]) }
-        return try await rpc.call("get_value_by_xmlnode", data: .strings(fields), publicAccess: false)
+        try await FirmwareNodes(rpc: rpc).read(fields)
     }
 
     // MARK: Node roots (case-sensitive, as the firmware serves them)
@@ -241,14 +240,13 @@ public struct LG6851Adapter: DeviceAdapter {
     // MARK: Devices
 
     public func devices() async throws -> [ConnectedDevice] {
-        let r = try await rpc.call("get_xml_childnode_value", data: .object([
+        let rows = try await FirmwareNodes(rpc: rpc).child(.object([
             "url": .string("LANDevice.1.Hosts.Host."),
             "num": .number(256),
             "node": .strings(["name": "HostName", "devName": "DevName", "mac": "MACAddress",
                               "ip": "IPAddress", "active": "Active", "interface": "Layer2Interface",
                               "type": "DeviceType", "online": "OnlineTime"])
-        ]), publicAccess: false)
-        guard case .array(let rows) = r["data"] else { throw CPEError.malformedResponse }
+        ]))
         return rows.enumerated().compactMap { index, row in
             // The unit returns every historical host; only Active=1 is online.
             guard row["active"].text == "1" else { return nil }
@@ -367,11 +365,9 @@ public struct LG6851Adapter: DeviceAdapter {
     /// Reads `LockCellList.LockCell.{i}.act/arfcn/pci` the way the stock page does
     /// (`get_xml_childnode_value`, lower-case field names).
     static func readLockedCells(_ rpc: any DeviceRPC) async throws -> [LockedCell] {
-        let r = try await rpc.call("get_xml_childnode_value", data: .object([
-            "url": .string(lockCellList),
-            "node": .strings(["act": "act", "arfcn": "arfcn", "pci": "pci"])
-        ]), publicAccess: false)
-        return parseLockedCells(r)
+        let rows = try await FirmwareNodes(rpc: rpc).child(root: lockCellList,
+                                                         fields: ["act": "act", "arfcn": "arfcn", "pci": "pci"])
+        return parseLockedCells(.object(["data": .array(rows)]))
     }
 
     static func parseLockedCells(_ r: JSONValue) -> [LockedCell] {
@@ -381,7 +377,7 @@ public struct LG6851Adapter: DeviceAdapter {
             let pci: Int?
             if row["pci"] == .string("") { pci = nil }
             else {
-                guard let value = row["pci"].text.flatMap(Int.init), (0...2000).contains(value) else { return nil }
+                guard let value = row["pci"].text.flatMap(Int.init) else { return nil }
                 pci = value
             }
             let index = row["child_node_idx"].text.flatMap(Int.init) ?? (offset + 1)

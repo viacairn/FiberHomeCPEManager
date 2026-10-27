@@ -27,37 +27,17 @@ public struct ConnectPage: View {
 
     /// A greyed-out button reads as "broken" rather than "password required". The button
     /// stays enabled and, when the password is missing, moves focus there and says why.
-    ///
-    /// Reject full-width input before a request so input-method conversion does not
-    /// consume a device authentication attempt.
     private func submit() {
-        if rejectedPasswordInput {
-            focus = .password
-            notices?.show("已阻止全角字符，请使用西文半角重新输入", tone: .error)
-            return
-        }
+        password = PasswordInput.halfWidth(password).trimmingCharacters(in: .whitespacesAndNewlines)
         if let issue = PasswordInput.issue(in: password) {
             focus = .password
-            showPasswordIssue(issue)
+            notices?.show(issue.message, tone: .error)
             return
         }
         onConnect()
     }
 
     @State private var revealPassword = false
-    @State private var rejectedPasswordInput = false
-
-    private func showPasswordIssue(_ issue: PasswordInputIssue) {
-        if case .fullWidth = issue {
-            notices?.show(issue.message, tone: .error, actionTitle: "改为半角") {
-                password = PasswordInput.halfWidth(password)
-                rejectedPasswordInput = false
-                focus = .password
-            }
-        } else {
-            notices?.show(issue.message, tone: .error)
-        }
-    }
 
     /// Strips `http://`, any path, and whitespace so the field only ever holds a host.
     static func cleanAddress(_ text: String) -> String {
@@ -126,12 +106,7 @@ public struct ConnectPage: View {
                         }
                         ZStack(alignment: .trailing) {
                             LoginPasswordField(text: $password, secure: !revealPassword, focus: $focus,
-                                               onSubmit: submit,
-                                               onRejectedInput: {
-                                                   rejectedPasswordInput = true
-                                                   notices?.show("已阻止全角字符，请使用西文半角重新输入", tone: .error)
-                                               },
-                                               onAcceptedInput: { rejectedPasswordInput = false })
+                                               onSubmit: submit)
                                 .padding(.leading, 10)
                                 .padding(.trailing, 34)
                                 .frame(height: 28)
@@ -143,6 +118,7 @@ public struct ConnectPage: View {
                                 )
                             Button {
                                 revealPassword.toggle()
+                                focus = .password
                             } label: {
                                 Image(systemName: revealPassword ? "eye.slash" : "eye")
                                     .font(.system(size: 11, weight: .medium))
@@ -178,8 +154,8 @@ public struct ConnectPage: View {
             if newValue != nil { focus = .password }
         }
         .onChange(of: password) { _, value in
-            if case .fullWidth = PasswordInput.issue(in: value),
-               let issue = PasswordInput.issue(in: value) { showPasswordIssue(issue) }
+            let normalized = PasswordInput.halfWidth(value)
+            if normalized != value { password = normalized }
         }
     }
 

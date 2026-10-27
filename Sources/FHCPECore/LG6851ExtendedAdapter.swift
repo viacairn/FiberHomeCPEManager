@@ -109,10 +109,7 @@ public struct LG6851ExtendedAdapter: Sendable {
         let nodes = childnodes.filter { !$0.isEmpty }
         guard !nodes.isEmpty else { return }
         for node in nodes {
-            _ = try await rpc.call("set_single_by_xmlnode", data: .object([
-                "url": .string(Self.recvRoot + "SMS_RecvMsg.\(node).isOpened"),
-                "value": .string("1")
-            ]), publicAccess: false)
+            try await FirmwareNodes(rpc: rpc).setSingle(Self.recvRoot + "SMS_RecvMsg.\(node).isOpened", "1")
         }
     }
 
@@ -148,7 +145,7 @@ public struct LG6851ExtendedAdapter: Sendable {
     /// No scan action exists in the verified API, so this reads the current neighbour set
     /// rather than triggering a fresh sweep.
     public func discoverableCells() async throws -> [CellRecord] {
-        let r = try await rpc.call("get_value_by_xmlnode", data: .strings([
+        let r = try await FirmwareNodes(rpc: rpc).read([
             "servingBand": "X_FH_MobileNetwork.RadioSignalParameter.NR_Band",
             "servingPci": "X_FH_MobileNetwork.RadioSignalParameter.NR_PCI",
             "servingRsrp": "X_FH_MobileNetwork.RadioSignalParameter.SSB_RSRP",
@@ -160,7 +157,7 @@ public struct LG6851ExtendedAdapter: Sendable {
             "rsrps": "X_FH_MobileNetwork.RadioSignalParameter.RSRP_NBR",
             "sinrs": "X_FH_MobileNetwork.RadioSignalParameter.SINR_NBR",
             "arfcn": "X_FH_MobileNetwork.RadioSignalParameter.EARFCN_NBR"
-        ]), publicAccess: false)
+        ])
 
         return Self.parseCells(
             servingBand: r["servingBand"].text,
@@ -248,90 +245,6 @@ public struct LG6851ExtendedAdapter: Sendable {
         if band.uppercased().hasPrefix("N") || band.uppercased().hasPrefix("B") { return band }
         guard let number = Int(band) else { return band }
         return tech == .lte ? "B\(number)" : "n\(number)"
-    }
-}
-
-/// Backend for `LockCoordinator` built on the verified cell/band nodes.
-public struct LG6851LockBackend: LockBackend {
-    public let rpc: any DeviceRPC
-    public init(rpc: any DeviceRPC) { self.rpc = rpc }
-
-    private static let lockCell = "X_FH_MobileNetwork.LockCellList."
-    private static let settings = "X_FH_MobileNetwork.NetworkSettings."
-
-    public func readMode() async throws -> LockMode {
-        let r = try await rpc.call("get_value_by_xmlnode", data: .strings([
-            "cellEnable": Self.lockCell + "LockEnable",
-            "bandEnable": Self.settings + "LockBandEnable",
-            "lteBands": Self.settings + "LTELockBAND",
-            "nrBands": Self.settings + "NRLockBAND"
-        ]), publicAccess: false)
-        let cells = r["cellEnable"].text == "1" ? try await LG6851Adapter.readLockedCells(rpc) : []
-        return LG6851Adapter.lockMode(cellEnable: r["cellEnable"].text, cells: cells,
-                                      bandEnable: r["bandEnable"].text,
-                                      lte: r["lteBands"].text, nr: r["nrBands"].text)
-    }
-
-    public func disableLocks() async throws {
-        try await write([
-            Self.lockCell + "LockEnable": "0",
-            Self.settings + "LockBandEnable": "0"
-        ])
-    }
-
-    public func apply(_ mode: LockMode) async throws {
-        switch mode {
-        case .automatic:
-            try await disableLocks()
-        case .bands(let lte, let nr):
-            try await write([
-                Self.settings + "LockBandEnable": "1",
-                Self.settings + "LTELockBAND": lte.map(String.init).joined(separator: ","),
-                Self.settings + "NRLockBAND": nr.map(String.init).joined(separator: ",")
-            ])
-        case .cell(let rat, let arfcn, let pci):
-            // The firmware locks onto a candidate *list*. Add the target if it is missing
-            // (the stock page rejects duplicate arfcn+pci), then turn the list on. Existing
-            // user entries are left untouched.
-            let existing = try await LG6851Adapter.readLockedCells(rpc)
-            if !existing.contains(where: { $0.arfcn == arfcn && $0.pci == pci }) {
-                guard existing.count < 20 else { throw CPEError.rejected }
-                let r = try await rpc.call("add_set_xmlnode", data: .object([
-                    "url": .string(LG6851Adapter.lockCellList),
-                    "setNode": .object([
-                        "url": .strings(["act": "act", "arfcn": "arfcn", "pci": "pci"]),
-                        "value": .strings(["act": String(rat), "arfcn": String(arfcn), "pci": pci.map(String.init) ?? ""])
-                    ])
-                ]), publicAccess: false)
-                try Self.check(r)
-            }
-            try await write([Self.lockCell + "LockEnable": "1"])
-        case .unknown:
-            throw CPEError.rejected
-        }
-    }
-
-    private static func check(_ r: JSONValue) throws {
-        if let success = r["success"].text {
-            guard success == "true" else { throw CPEError.uncertain }
-        } else {
-            let result = r["result"].text ?? ""
-            guard result == "0" || result.isEmpty else { throw CPEError.uncertain }
-        }
-    }
-
-    private func write(_ fields: [String: String]) async throws {
-        for name in fields.keys.sorted() {
-            let r = try await rpc.call("set_single_by_xmlnode",
-                                       data: .object(["url": .string(name), "value": .string(fields[name]!)]),
-                                       publicAccess: false)
-            if let success = r["success"].text {
-                guard success == "true" else { throw CPEError.uncertain }
-            } else {
-                let result = r["result"].text ?? ""
-                guard result == "0" || result.isEmpty else { throw CPEError.uncertain }
-            }
-        }
     }
 }
 
